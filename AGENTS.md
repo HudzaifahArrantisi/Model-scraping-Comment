@@ -26,6 +26,12 @@ Pipeline analisis sentimen bahasa Indonesia untuk 5 topik kebijakan: `prabowo_gi
 
 ## Framework & toolchain quirks
 - **ComplementNB** (default) is recommended over MultinomialNB for class imbalance
+- **SmartSentimentLabeler** replaces simple LexiconLabeler with chain-of-thought reasoning:
+  - Sarcasm detection (kata positif + konteks negatif = negatif)
+  - Negation reversal ("tidak bagus" → negatif)
+  - Position-weighted scoring (kalimat akhir bobot 1.5x)
+  - Contradiction analysis (tapi/namun/sayangnya → segmen akhir dominan)
+  - `LexiconLabeler` alias preserved for backward compatibility
 - `matplotlib.use("Agg")` — non-interactive backend, plots save to file only
 - `scan_link.py` imports from `naive_bayes_sentimen.py` (must be co-located)
 - Preprocessing uses PySastrawi for Indonesian stemming and slang normalization

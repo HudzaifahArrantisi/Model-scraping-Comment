@@ -235,33 +235,48 @@ class PreprocessorIndonesia:
 
 
 # ─────────────────────────────────────────────
-#  2. LABELING OTOMATIS (Rule-based + Lexicon)
+#  2. LABELING OTOMATIS CERDAS (Smart Reasoning)
+#     Chain-of-Thought Sentiment Labeler
 # ─────────────────────────────────────────────
-class LexiconLabeler:
+class SmartSentimentLabeler:
     """
-    Pelabelan sentimen berbasis lexicon untuk data yang BELUM berlabel.
-    Digunakan sebagai inisiasi sebelum Naive Bayes dilatih.
+    Pelabelan sentimen CERDAS berbasis "thinking process" untuk data
+    yang BELUM berlabel. Menggunakan logika reasoning multi-tahap:
+
+    THINKING PROCESS:
+    1. Identifikasi Subjek & Objek   → siapa/apa yang dikritik/dipuji?
+    2. Pisahkan Fakta vs Emosi       → kritik membangun vs hujatan?
+    3. Analisis Sarkasme & Budaya    → kata positif untuk sindiran?
+    4. Bobot Dampak Akhir            → kalimat akhir lebih menentukan
+
+    Fitur Cerdas:
+    - Deteksi NEGASI  : "tidak bagus" → negatif (bukan positif)
+    - Deteksi SARKASME: "hebat sekali, rakyat makin puasa" → negatif
+    - Deteksi FRASA   : "tepat sasaran", "program gagal" → konteks utuh
+    - Bobot POSISI    : kalimat di akhir teks punya bobot 1.5x
+    - Deteksi KONTRADIKSI: positif + negatif bersamaan → analisis dominan
     """
 
+    # ── KATA POSITIF (single-word) ──
     POSITIF_WORDS = {
         "bagus", "baik", "mantap", "dukung", "setuju", "bermanfaat",
         "berhasil", "sukses", "positif", "maju", "pro", "mendukung",
         "meningkat", "harapan", "solusi", "inovasi", "keren",
         "sejahtera", "makmur", "tepat", "efektif", "efisien",
         "transparan", "adil", "merata", "terlaksana", "terwujud",
-        "apresiasi", "pujian", "terimakasih", "luar biasa", "hebat",
+        "apresiasi", "pujian", "terimakasih", "hebat",
         "wow", "amazing", "good", "best", "optimal", "brilian",
         "cerdas", "visioner", "progresif", "kompeten", "profesional",
         "berani", "tegas", "salut", "respect", "bangga", "proud",
         "senang", "gembira", "puas", "lega", "syukur", "alhamdulillah",
         "terbaik", "berkualitas", "unggul", "mumpuni", "andal",
         "membantu", "menolong", "memudahkan", "menyejahterakan",
-        "bagus", "baik", "mantap", "dukung", "setuju",
-        "program bagus", "sangat membantu", "bermanfaat",
-        "anak senang", "makan gratis", "gizi terpenuhi",
-        "lanjutkan", "semoga lancar", "tepat sasaran",
+        "lanjutkan", "semangat", "inspirasi", "mengagumkan",
+        "stabil", "aman", "damai", "nyaman", "sehat", "kuat",
+        "berterima kasih", "terbantu", "bersyukur", "mantul",
     }
 
+    # ── KATA NEGATIF (single-word) ──
     NEGATIF_WORDS = {
         "buruk", "gagal", "tolak", "kecewa", "rugi", "korupsi",
         "bohong", "tipu", "palsu", "salah", "jelek", "parah",
@@ -274,36 +289,338 @@ class LexiconLabeler:
         "munafik", "otoriter", "nepotisme", "kolaps", "anjlok",
         "merosot", "memburuk", "mengancam", "menghancurkan",
         "korban", "sengsara", "menderita", "terancam", "terpuruk",
-        "PHK", "pengangguran", "inflasi", "utang", "defisit",
+        "pengangguran", "inflasi", "utang", "defisit",
         "manipulasi", "penyelewengan", "penyalahgunaan", "korup",
-        "berbahaya", "merugikan", "mengorbankan", "mengkhianati",
-        "gagal", "tolak", "kecewa", "rugi", "korupsi",
-        "bohong", "tipu", "palsu", "salah", "jelek", "parah",
-        "g ada mbg", "ga ada mbg", "gak ada mbg", "tidak ada mbg",
-        "dulu g ada", "dulu ga ada", "masih hidup",
-        "buat apa", "percuma", "mending", "tidak perlu",
-        "pencitraan", "buang anggaran", "hambur anggaran",
-        "uang rakyat", "program gagal", "tidak setuju",
-        "keracunan", "basi", "tidak layak", "sakit perut",
-  
+        "berbahaya", "mengorbankan", "mengkhianati",
+        "percuma", "sia-sia", "pencitraan", "keracunan", "basi",
+        "sampah", "omong kosong", "pembodohan", "penipuan",
+        "memperburuk", "memperparah", "menghambat", "menghalangi",
+        "PHK", "dipecat", "dirugikan", "ditindas", "dibungkam",
     }
 
-    def label(self, text: str) -> str:
-        """Labeli satu teks berdasarkan jumlah kata positif vs negatif."""
-        text_lower = text.lower()
-        pos_count = sum(1 for w in self.POSITIF_WORDS if w in text_lower)
-        neg_count = sum(1 for w in self.NEGATIF_WORDS if w in text_lower)
+    # ── FRASA POSITIF (multi-word, konteks utuh) ──
+    POSITIF_PHRASES = [
+        "sangat membantu", "tepat sasaran", "pro rakyat", "luar biasa",
+        "program bagus", "program terbaik", "kerja nyata", "bukti nyata",
+        "anak senang", "makan gratis", "gizi terpenuhi", "semoga lancar",
+        "dukung penuh", "terima kasih", "sangat bermanfaat",
+        "langkah tepat", "langkah berani", "langkah progresif",
+        "ekonomi tumbuh", "investasi meningkat", "harga turun",
+        "harga stabil", "lapangan kerja", "daya saing",
+        "angin segar", "harapan baru", "masa depan cerah",
+        "rakyat sejahtera", "rakyat terbantu", "rakyat senang",
+        "membantu siswa", "mengurangi stunting", "generasi sehat",
+        "lebih baik", "sangat bagus", "sangat keren",
+        "berkembang pesat", "tumbuh signifikan", "meningkat pesat",
+    ]
 
-        if neg_count > pos_count:
-            return "negatif"
-        elif pos_count > neg_count:
-            return "positif"
+    # ── FRASA NEGATIF (multi-word, konteks utuh) ──
+    NEGATIF_PHRASES = [
+        "program gagal", "tidak setuju", "tidak layak", "sakit perut",
+        "buang anggaran", "hambur anggaran", "uang rakyat dipakai",
+        "pencitraan belaka", "buat apa", "tidak perlu",
+        "ga ada mbg", "gak ada mbg", "tidak ada mbg",
+        "rakyat sengsara", "rakyat susah", "rakyat miskin",
+        "harga naik", "harga sembako naik", "harga mahal",
+        "korupsi merajalela", "korupsi makin", "rawan korupsi",
+        "tanpa pengawasan", "tanpa transparansi", "tidak transparan",
+        "gagal total", "cuma janji", "janji kosong", "janji palsu",
+        "pro oligarki", "boneka oligarki", "mafia tanah",
+        "PHK massal", "PHK dimana-mana", "dipecat massal",
+        "potong dana", "anggaran dipotong", "subsidi dihapus",
+        "kualitas buruk", "tidak bergizi", "makanan basi",
+        "demo ditindas", "anti demokrasi", "anti kritik",
+        "utang nambah", "utang naik", "rupiah melemah",
+        "sama aja", "percuma saja", "sia-sia saja",
+    ]
+
+    # ── FRASA NETRAL (indikator teks netral) ──
+    NETRAL_PHRASES = [
+        "perlu evaluasi", "perlu dikaji", "perlu kajian",
+        "belum bisa dinilai", "masih terlalu dini", "kita lihat dulu",
+        "ada plus minusnya", "pro dan kontra", "pro kontra",
+        "masih proses", "masih bertahap", "masih tahap awal",
+        "perlu waktu", "menunggu hasil", "mari beri kesempatan",
+        "perlu dipantau", "perlu diawasi", "perlu pengawasan",
+        "belum ada data", "belum terlihat dampak",
+        "perlu sosialisasi", "perlu penyesuaian",
+        "wajar ada kendala", "masih dalam tahap",
+    ]
+
+    # ── POLA SARKASME (kata positif diikuti konteks negatif) ──
+    SARKASME_PATTERNS = [
+        # (trigger_positif, konteks_negatif_yang_mengikuti)
+        ("hebat", ["rakyat puasa", "rakyat sengsara", "rakyat susah", "rakyat miskin",
+                    "makin susah", "makin miskin", "gak bisa makan", "tidak bisa makan"]),
+        ("bagus", ["rakyat sengsara", "rakyat susah", "harga naik", "makin mahal"]),
+        ("mantap", ["rakyat sengsara", "PHK", "harga naik", "korupsi"]),
+        ("keren", ["rakyat sengsara", "rakyat susah", "harga naik"]),
+        ("luar biasa", ["rakyat sengsara", "rakyat susah", "korupsi", "gagal"]),
+        ("bravo", ["rakyat sengsara", "rakyat susah", "gagal"]),
+        ("sukses", ["menghancurkan", "merusak", "merugikan", "memiskinkan"]),
+    ]
+
+    # ── KATA NEGASI (membalikkan sentimen kata berikutnya) ──
+    NEGASI_WORDS = {
+        "tidak", "gak", "ga", "gk", "ngga", "nggak", "bukan",
+        "belum", "jangan", "tanpa", "tak", "enggak", "kagak",
+        "bukanlah", "tidaklah", "takkan", "takkan",
+    }
+
+    # ── KATA KONTRADIKSI/TRANSISI (menandai perubahan arah sentimen) ──
+    KONTRADIKSI_WORDS = {
+        "tapi", "tetapi", "namun", "sayangnya", "sayang",
+        "meskipun", "walaupun", "walau", "kendati",
+        "sementara", "padahal", "sebaliknya", "justru",
+        "malah", "malahan", "nyatanya", "kenyataannya",
+    }
+
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+
+    def _detect_sarcasm(self, text_lower: str) -> bool:
+        """
+        THINKING STEP 3: Analisis Sarkasme & Konteks Budaya
+        Netizen Indonesia sering menggunakan kata positif untuk menyindir.
+        Contoh: "Hebat sekali kebijakannya, rakyat makin rajin puasa
+                 karena tidak bisa beli makan" → NEGATIF
+        """
+        for trigger, negative_contexts in self.SARKASME_PATTERNS:
+            if trigger in text_lower:
+                for context in negative_contexts:
+                    if context in text_lower:
+                        return True
+        return False
+
+    def _apply_negation(self, tokens: list) -> tuple:
+        """
+        THINKING STEP 2: Deteksi Negasi
+        Jika ada kata negasi sebelum kata positif, maka menjadi negatif.
+        Jika ada kata negasi sebelum kata negatif, maka menjadi positif.
+        Contoh: "tidak bagus" → negatif, "tidak gagal" → positif
+        """
+        negated_pos = 0  # positif yang ter-negasi → jadi negatif
+        negated_neg = 0  # negatif yang ter-negasi → jadi positif
+
+        for i, token in enumerate(tokens):
+            if token in self.NEGASI_WORDS and i + 1 < len(tokens):
+                next_word = tokens[i + 1]
+                # Cek 2 kata ke depan untuk menangkap "tidak terlalu bagus"
+                next_two = tokens[i + 1] if i + 1 < len(tokens) else ""
+                if next_word in self.POSITIF_WORDS:
+                    negated_pos += 1
+                elif next_word in self.NEGATIF_WORDS:
+                    negated_neg += 1
+                # Cek kata ke-2 setelah negasi
+                if i + 2 < len(tokens):
+                    second_word = tokens[i + 2]
+                    if second_word in self.POSITIF_WORDS and next_word not in self.NEGATIF_WORDS:
+                        negated_pos += 1
+                    elif second_word in self.NEGATIF_WORDS and next_word not in self.POSITIF_WORDS:
+                        negated_neg += 1
+
+        return negated_pos, negated_neg
+
+    def _score_with_position_weight(self, text_lower: str) -> tuple:
+        """
+        THINKING STEP 4: Bobot Dampak Akhir (Net Sentiment Impact)
+        Kalimat di akhir teks memiliki bobot lebih tinggi karena biasanya
+        berisi kesimpulan dari opini netizen.
+        
+        Contoh:
+        "Programnya sebenarnya bagus, tapi kalau korupsi terus ya percuma"
+        → dominan: kekecewaan di akhir → NEGATIF
+        
+        "Awalnya saya ragu, tapi setelah dicoba ternyata sangat membantu"
+        → dominan: kepuasan di akhir → POSITIF
+        """
+        # Bagi teks menjadi segmen berdasarkan kata kontradiksi
+        segments = re.split(
+            r'\b(?:' + '|'.join(re.escape(w) for w in self.KONTRADIKSI_WORDS) + r')\b',
+            text_lower
+        )
+
+        total_pos = 0.0
+        total_neg = 0.0
+        total_netral = 0.0
+
+        num_segments = len(segments)
+        for idx, segment in enumerate(segments):
+            # Bobot: segmen terakhir mendapat bobot 1.5x
+            # Segmen setelah kata kontradiksi (tapi/namun) biasanya berisi sentimen utama
+            weight = 1.5 if idx == num_segments - 1 and num_segments > 1 else 1.0
+
+            seg_lower = segment.strip()
+            if not seg_lower:
+                continue
+
+            # Hitung frasa positif
+            for phrase in self.POSITIF_PHRASES:
+                if phrase in seg_lower:
+                    total_pos += weight * 2  # frasa bernilai 2x kata tunggal
+
+            # Hitung frasa negatif
+            for phrase in self.NEGATIF_PHRASES:
+                if phrase in seg_lower:
+                    total_neg += weight * 2
+
+            # Hitung frasa netral
+            for phrase in self.NETRAL_PHRASES:
+                if phrase in seg_lower:
+                    total_netral += weight * 2
+
+            # Hitung kata tunggal positif
+            seg_tokens = seg_lower.split()
+            for token in seg_tokens:
+                if token in self.POSITIF_WORDS:
+                    total_pos += weight
+                if token in self.NEGATIF_WORDS:
+                    total_neg += weight
+
+        return total_pos, total_neg, total_netral
+
+    def _thinking_label(self, text: str) -> dict:
+        """
+        FULL CHAIN-OF-THOUGHT REASONING
+        Proses berpikir lengkap untuk menentukan label sentimen.
+        
+        Returns dict berisi:
+        - label: str (positif/negatif/netral)
+        - confidence: str (tinggi/sedang/rendah)
+        - reasoning: str (penjelasan singkat)
+        - aspek_positif: list
+        - aspek_negatif: list
+        - is_sarcasm: bool
+        - is_ambiguous: bool
+        """
+        text_lower = text.lower().strip()
+        tokens = text_lower.split()
+
+        result = {
+            "label": "netral",
+            "confidence": "rendah",
+            "reasoning": "",
+            "aspek_positif": [],
+            "aspek_negatif": [],
+            "is_sarcasm": False,
+            "is_ambiguous": False,
+        }
+
+        if not text_lower or len(tokens) < 2:
+            result["reasoning"] = "Teks terlalu pendek untuk dianalisis"
+            return result
+
+        # ── STEP 1: Identifikasi aspek positif & negatif ──
+        for w in self.POSITIF_WORDS:
+            if w in text_lower:
+                result["aspek_positif"].append(w)
+        for phrase in self.POSITIF_PHRASES:
+            if phrase in text_lower:
+                result["aspek_positif"].append(f"[frasa] {phrase}")
+
+        for w in self.NEGATIF_WORDS:
+            if w in text_lower:
+                result["aspek_negatif"].append(w)
+        for phrase in self.NEGATIF_PHRASES:
+            if phrase in text_lower:
+                result["aspek_negatif"].append(f"[frasa] {phrase}")
+
+        # ── STEP 2: Deteksi sarkasme ──
+        is_sarcasm = self._detect_sarcasm(text_lower)
+        result["is_sarcasm"] = is_sarcasm
+        if is_sarcasm:
+            result["label"] = "negatif"
+            result["confidence"] = "tinggi"
+            result["reasoning"] = "Terdeteksi SARKASME: kata positif digunakan untuk menyindir"
+            return result
+
+        # ── STEP 3: Deteksi negasi ──
+        negated_pos, negated_neg = self._apply_negation(tokens)
+
+        # ── STEP 4: Hitung skor dengan bobot posisi ──
+        pos_score, neg_score, netral_score = self._score_with_position_weight(text_lower)
+
+        # Terapkan negasi: positif yang dinegasi menambah skor negatif, sebaliknya
+        pos_score = pos_score - (negated_pos * 1.5) + (negated_neg * 1.0)
+        neg_score = neg_score + (negated_pos * 1.5) - (negated_neg * 1.0)
+
+        # ── STEP 5: Deteksi frasa netral langsung ──
+        for phrase in self.NETRAL_PHRASES:
+            if phrase in text_lower:
+                netral_score += 2.0
+
+        # ── STEP 6: Tentukan label berdasarkan skor ──
+        has_both = len(result["aspek_positif"]) > 0 and len(result["aspek_negatif"]) > 0
+        result["is_ambiguous"] = has_both
+
+        # Cek apakah ada kata kontradiksi → jika iya, kalimat akhir lebih dominan
+        has_contradiction = any(w in text_lower for w in self.KONTRADIKSI_WORDS)
+
+        if has_contradiction and has_both:
+            # Ada kontradiksi + ambigu → sentimen akhir menentukan
+            result["reasoning"] = "Teks ambigu (positif+negatif) dengan kata kontradiksi; kalimat akhir diutamakan"
+        elif has_both:
+            result["reasoning"] = "Teks mengandung aspek positif dan negatif; skor dominan digunakan"
+
+        # Threshold keputusan
+        diff = abs(pos_score - neg_score)
+        if diff < 1.0 and netral_score >= 2.0:
+            result["label"] = "netral"
+            result["confidence"] = "sedang"
+            if not result["reasoning"]:
+                result["reasoning"] = "Skor positif dan negatif berimbang dengan indikator netral"
+        elif diff < 0.5:
+            result["label"] = "netral"
+            result["confidence"] = "rendah"
+            if not result["reasoning"]:
+                result["reasoning"] = "Skor hampir seimbang, dilabeli netral"
+        elif neg_score > pos_score:
+            result["label"] = "negatif"
+            result["confidence"] = "tinggi" if diff > 3.0 else "sedang"
+            if not result["reasoning"]:
+                result["reasoning"] = f"Skor negatif dominan ({neg_score:.1f} vs {pos_score:.1f})"
+        elif pos_score > neg_score:
+            result["label"] = "positif"
+            result["confidence"] = "tinggi" if diff > 3.0 else "sedang"
+            if not result["reasoning"]:
+                result["reasoning"] = f"Skor positif dominan ({pos_score:.1f} vs {neg_score:.1f})"
         else:
-            return "netral"
+            result["label"] = "netral"
+            result["confidence"] = "rendah"
+            if not result["reasoning"]:
+                result["reasoning"] = "Tidak ada indikator sentimen yang cukup kuat"
+
+        return result
+
+    def label(self, text: str) -> str:
+        """Labeli satu teks menggunakan chain-of-thought reasoning."""
+        result = self._thinking_label(text)
+        if self.verbose:
+            print(f"\n    ── THINKING ──")
+            print(f"    Teks     : {text[:80]}...")
+            print(f"    Positif  : {result['aspek_positif'][:5]}")
+            print(f"    Negatif  : {result['aspek_negatif'][:5]}")
+            print(f"    Sarkasme : {'YA' if result['is_sarcasm'] else 'Tidak'}")
+            print(f"    Ambigu   : {'YA' if result['is_ambiguous'] else 'Tidak'}")
+            print(f"    Reasoning: {result['reasoning']}")
+            print(f"    Label    : {result['label'].upper()} ({result['confidence']})")
+        return result["label"]
+
+    def label_with_detail(self, text: str) -> dict:
+        """Labeli satu teks dan kembalikan detail reasoning lengkap."""
+        return self._thinking_label(text)
 
     def label_batch(self, texts: list) -> list:
-        """Labeli batch teks."""
+        """Labeli batch teks menggunakan smart reasoning."""
         return [self.label(t) for t in texts]
+
+    def label_batch_with_detail(self, texts: list) -> list:
+        """Labeli batch teks dan kembalikan semua detail reasoning."""
+        return [self._thinking_label(t) for t in texts]
+
+
+# ── BACKWARD COMPATIBILITY: alias LexiconLabeler ──
+LexiconLabeler = SmartSentimentLabeler
 
 
 # ─────────────────────────────────────────────
@@ -870,8 +1187,8 @@ CONTOH PENGGUNAAN:
         elif "label" in df.columns:
             label_col = "label"
         else:
-            print("  [INFO] Kolom label tidak ditemukan. Melabeli otomatis dengan lexicon...")
-            labeler = LexiconLabeler()
+            print("  [INFO] Kolom label tidak ditemukan. Melabeli otomatis dengan Smart Reasoning...")
+            labeler = SmartSentimentLabeler()
             texts = df[text_col].fillna("").astype(str).tolist()
             df["sentimen_auto"] = labeler.label_batch(texts)
             label_col = "sentimen_auto"

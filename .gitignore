@@ -1,1 +1,9 @@
 opencode.json
+data_raw/*.csv
+hasil/*.csv
+hasil_scanning/*.csv
+hasil_scan/*.csv
+*.csv
+hasil_scanning/plots/
+AGENTS.md
+CLAUDE.md
