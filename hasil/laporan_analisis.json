@@ -1,0 +1,71 @@
+{
+  "judul": "Analisis Sentimen Masyarakat Terhadap Kebijakan Pemerintah Indonesia",
+  "metode": "Naive Bayes (ComplementNB) + TF-IDF Vectorizer",
+  "generated_at": "2026-06-26T03:26:41.540128",
+  "metrik_model": {
+    "accuracy": 0.84,
+    "cv_mean": 0.835,
+    "cv_std": 0.07176350047203664,
+    "cv_scores": [
+      0.725,
+      0.825,
+      0.8,
+      0.925,
+      0.9
+    ]
+  },
+  "distribusi_sentimen": [
+    {
+      "topik": "danantara",
+      "total_data": 50,
+      "negatif_count": 23,
+      "positif_count": 27,
+      "negatif_pct": 46.0,
+      "positif_pct": 54.0,
+      "sentimen_dominan": "positif"
+    },
+    {
+      "topik": "efisiensi_anggaran",
+      "total_data": 50,
+      "negatif_count": 21,
+      "positif_count": 29,
+      "negatif_pct": 42.0,
+      "positif_pct": 58.0,
+      "sentimen_dominan": "positif"
+    },
+    {
+      "topik": "makan_bergizi_gratis",
+      "total_data": 50,
+      "negatif_count": 24,
+      "positif_count": 26,
+      "negatif_pct": 48.0,
+      "positif_pct": 52.0,
+      "sentimen_dominan": "positif"
+    },
+    {
+      "topik": "omnibus_law",
+      "total_data": 50,
+      "negatif_count": 26,
+      "positif_count": 24,
+      "negatif_pct": 52.0,
+      "positif_pct": 48.0,
+      "sentimen_dominan": "negatif"
+    },
+    {
+      "topik": "prabowo_gibran",
+      "total_data": 50,
+      "negatif_count": 26,
+      "positif_count": 24,
+      "negatif_pct": 52.0,
+      "positif_pct": 48.0,
+      "sentimen_dominan": "negatif"
+    }
+  ],
+  "topik_kebijakan": [
+    "1. Pemerintahan Prabowo-Gibran",
+    "2. Omnibus Law Cipta Kerja",
+    "3. Danantara (Badan Pengelola Investasi)",
+    "4. Makan Bergizi Gratis (MBG)",
+    "5. Efisiensi Anggaran 2025"
+  ]
+}

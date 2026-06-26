@@ -680,10 +680,9 @@ def generate_dataset_realistis(topik_name: str, max_per_topik: int = 500) -> pd.
 
     config = TOPIK_CONFIG.get(topik_name, {"since": "2024-01-01", "until": "2025-06-01"})
 
-    # Distribusi realistis: ~45% negatif, ~30% positif, ~25% netral
-    n_negatif = int(max_per_topik * 0.43)
-    n_positif = int(max_per_topik * 0.32)
-    n_netral = max_per_topik - n_negatif - n_positif
+    # Distribusi: ~50% negatif, ~50% positif (tanpa netral)
+    n_negatif = int(max_per_topik * 0.50)
+    n_positif = max_per_topik - n_negatif
 
     data = []
     seen_hashes = set()
@@ -719,7 +718,6 @@ def generate_dataset_realistis(topik_name: str, max_per_topik: int = 500) -> pd.
 
     _add_comments(negatif_base, "negatif", n_negatif)
     _add_comments(positif_base, "positif", n_positif)
-    _add_comments(netral_base, "netral", n_netral)
 
     df = pd.DataFrame(data)
     # Shuffle agar tidak urut per label

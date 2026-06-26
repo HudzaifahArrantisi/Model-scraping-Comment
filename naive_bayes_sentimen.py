@@ -52,6 +52,7 @@ from datetime import datetime
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB, ComplementNB
+from sklearn.linear_model import SGDClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     accuracy_score, classification_report, confusion_matrix,
@@ -77,7 +78,8 @@ os.makedirs("./hasil/plots", exist_ok=True)
 
 TEXT_COLUMN_CANDIDATES = [
     "text", "teks", "comment", "komentar", "caption", "content",
-    "full_text", "tweet", "body", "message"
+    "full_text", "tweet", "body", "message",
+    "text_clean",  # fallback untuk feedback history CSV
 ]
 
 
@@ -112,13 +114,15 @@ class PreprocessorIndonesia:
     Pipeline: clean -> normalize_slang -> remove_stopwords -> stem
     """
 
-    # Kamus normalisasi slang/singkatan umum Twitter/TikTok (120+ kata)
+    # Kamus normalisasi slang/singkatan umum Twitter/TikTok (140+ kata)
     SLANG_DICT = {
         # Negasi
         "gk": "tidak", "ga": "tidak", "gak": "tidak", "ngga": "tidak",
         "nggak": "tidak", "tdk": "tidak", "gbs": "tidak bisa", "gabisa": "tidak bisa",
         "gaada": "tidak ada", "gada": "tidak ada", "gamau": "tidak mau",
         "gabole": "tidak boleh", "gabakal": "tidak akan",
+        "g": "tidak", "gda": "tidak ada", "gadapet": "tidak dapat", "gdpt": "tidak dapat",
+        "gatau": "tidak tahu", "gtau": "tidak tahu",
         # Intensifier
         "bgt": "banget", "bngt": "banget", "bgtt": "banget",
         "bener2": "benar-benar", "bnr": "benar", "bnr2": "benar-benar",
@@ -127,11 +131,13 @@ class PreprocessorIndonesia:
         "yg": "yang", "dg": "dengan", "dgn": "dengan", "utk": "untuk",
         "krn": "karena", "karna": "karena", "klo": "kalau", "kalo": "kalau",
         "udh": "sudah", "udah": "sudah", "sdh": "sudah", "dah": "sudah",
-        "blm": "belum", "blum": "belum", "msh": "masih",
+        "blm": "belum", "blum": "belum", "msh": "masih", "masi": "masih",
         "sy": "saya", "gw": "saya", "gue": "saya", "ane": "saya",
         "lu": "kamu", "lo": "kamu", "kmu": "kamu", "elo": "kamu",
         "dr": "dari", "dri": "dari", "pd": "pada", "dlm": "dalam",
         "ttg": "tentang", "spt": "seperti", "sprt": "seperti",
+        "sampe": "sampai", "skg": "sekarang", "skrng": "sekarang", "skr": "sekarang",
+        "ortu": "orang tua", "ortunya": "orang tua", "jabat": "pejabat",
         "dll": "dan lain lain", "dsb": "dan sebagainya", "dst": "dan seterusnya",
         "hrs": "harus", "hrus": "harus", "musti": "harus",
         "dpt": "dapat", "bs": "bisa", "bsa": "bisa",
@@ -142,6 +148,8 @@ class PreprocessorIndonesia:
         "gt": "begitu", "gitu": "begitu", "gini": "begini",
         "lg": "lagi", "nih": "ini", "tuh": "itu",
         "mkn": "makan", "mksd": "maksud", "mksud": "maksud",
+        "tol0l": "tolol", "gobl0k": "goblok", "bgo": "bego", "bngst": "bangsat", "ajg": "anjing",
+        "dongok": "dongo", "dunguk": "dungu", "sed0ngok": "dongo", "p3merintah": "pemerintah",
         # Kata terkait kebijakan
         "pemrintah": "pemerintah", "pmerintah": "pemerintah",
         "rkyt": "rakyat", "rkyat": "rakyat",
@@ -157,6 +165,27 @@ class PreprocessorIndonesia:
         "no cap": "serius", "fr": "serius",
         # Emotikon teks
         ":)": "", ":(": "", ":D": "", "xD": "", ":'(": "",
+    }
+
+    # ── EMOJI ↔ SENTIMENT TOKEN ──
+    EMOJI_MAP = {
+        # Positif
+        "👍": "positif_emoji", "🙏": "positif_emoji", "💪": "positif_emoji",
+        "❤️": "positif_emoji", "😊": "positif_emoji", "😍": "positif_emoji",
+        "🥰": "positif_emoji", "😁": "positif_emoji", "😂": "positif_emoji",
+        "🤣": "positif_emoji", "🔥": "positif_emoji", "✨": "positif_emoji",
+        "🌟": "positif_emoji", "🎉": "positif_emoji", "🇮🇩": "positif_emoji",
+        "✅": "positif_emoji", "👏": "positif_emoji", "🙌": "positif_emoji",
+        # Negatif
+        "😡": "negatif_emoji", "😤": "negatif_emoji", "🤬": "negatif_emoji",
+        "👎": "negatif_emoji", "😢": "negatif_emoji", "😭": "negatif_emoji",
+        "💀": "negatif_emoji", "☠️": "negatif_emoji", "😠": "negatif_emoji",
+        "🤮": "negatif_emoji", "😷": "negatif_emoji", "💔": "negatif_emoji",
+        "❌": "negatif_emoji", "🚫": "negatif_emoji", "😞": "negatif_emoji",
+        "😔": "negatif_emoji", "😒": "negatif_emoji", "🙄": "negatif_emoji",
+        # Netral / tanya
+        "❓": "netral_emoji", "⁉️": "netral_emoji", "🤔": "netral_emoji",
+        "😐": "netral_emoji", "😑": "netral_emoji",
     }
 
     def __init__(self, use_stemming: bool = True):
@@ -198,7 +227,12 @@ class PreprocessorIndonesia:
         text = re.sub(r"http\S+|www\S+", "", text)              # hapus URL
         text = re.sub(r"@\w+", "", text)                         # hapus mention
         text = re.sub(r"#(\w+)", r"\1", text)                    # hapus # tapi simpan kata
-        text = re.sub(r"[^\w\s]", " ", text)                     # hapus tanda baca & emoji
+
+        # Ganti emoji dengan token sentimen (sebelum hapus tanda baca)
+        for emoji, token in self.EMOJI_MAP.items():
+            text = text.replace(emoji, f" {token} ")
+
+        text = re.sub(r"[^\w\s]", " ", text)                     # hapus tanda baca sisa
         text = re.sub(r"\d+", "", text)                          # hapus angka
         text = re.sub(r"\b(\w)\1{2,}\b", r"\1", text)          # hapus huruf berulang (baguuus -> bagus)
         text = re.sub(r"\s+", " ", text).strip()                 # normalisasi spasi
@@ -295,7 +329,15 @@ class SmartSentimentLabeler:
         "percuma", "sia-sia", "pencitraan", "keracunan", "basi",
         "sampah", "omong kosong", "pembodohan", "penipuan",
         "memperburuk", "memperparah", "menghambat", "menghalangi",
-        "PHK", "dipecat", "dirugikan", "ditindas", "dibungkam",
+        "phk", "dipecat", "dirugikan", "ditindas", "dibungkam",
+        # Medsos / kebijakan
+        "tolol", "goblok", "bego", "bloon", "dongo", "dungu", "otak udang", "sok",
+        "anjing", "ajg", "bangsat", "bngst", "nyet", "monyet", "kampret", "sialan", "babi",
+        "stunting", "kelaparan", "mati", "meninggal", "tewas", "bunuh", "racun", "sakit",
+        "malas", "males", "beban", "membebani", "mahal", "kemahalan", "potong", "dipotong",
+        "emosi", "kesal", "marah", "benci", "suap", "menyuap", "disuap", "cacat",
+        "bocil", "fomo", "penjilat", "penyepong", "buzzer", "buzzerp", "kritik", "hilang",
+        "ilang", "tanya", "nyabu", "nyoli", "drunk"
     }
 
     # ── FRASA POSITIF (multi-word, konteks utuh) ──
@@ -326,12 +368,27 @@ class SmartSentimentLabeler:
         "tanpa pengawasan", "tanpa transparansi", "tidak transparan",
         "gagal total", "cuma janji", "janji kosong", "janji palsu",
         "pro oligarki", "boneka oligarki", "mafia tanah",
-        "PHK massal", "PHK dimana-mana", "dipecat massal",
+        "phk massal", "phk dimana-mana", "dipecat massal",
         "potong dana", "anggaran dipotong", "subsidi dihapus",
         "kualitas buruk", "tidak bergizi", "makanan basi",
         "demo ditindas", "anti demokrasi", "anti kritik",
         "utang nambah", "utang naik", "rupiah melemah",
         "sama aja", "percuma saja", "sia-sia saja",
+        # Kebijakan
+        "bukan solusi", "bukan prioritas", "bukan ngasih makan", "bukan memberi makan",
+        "bukan malah", "tidak mendidik", "ga mendidik", "gak mendidik",
+        "mending kasih pancing", "mending kasih alat", "kasih pancing", "alat pancing",
+        "bukan ngasih", "bukan memberi", "ngapain", "ga perlu", "gak perlu",
+        "hambur uang", "buang uang", "pesta korupsi", "stunting naik",
+        "tidak didengar", "tidak mendengar", "gak didengar", "ga didengar",
+        "gimana sih", "gimana bisa", "kok bisa", "kok gitu", "turun drastis",
+        "ganti presiden", "ganti program", "tidak sustain", "ga sustain", "gak sustain",
+        "tidak tahu analogi", "ga tau analogi", "gatau analogi", "serba instan",
+        "tidak pernah mikir", "ga pernah mikir", "gak pernah mikir", "tidak ada niatan",
+        "tidak didengar", "tidak ada isi", "ga ada isi", "gak ada isi",
+        "tidak dapet mbg", "ga dapet mbg", "gak dapet mbg",
+        "mana paham", "tidak paham", "ga paham", "gak paham", "ngga paham",
+        "dollar naik"
     ]
 
     # ── FRASA NETRAL (indikator teks netral) ──
@@ -351,20 +408,37 @@ class SmartSentimentLabeler:
     SARKASME_PATTERNS = [
         # (trigger_positif, konteks_negatif_yang_mengikuti)
         ("hebat", ["rakyat puasa", "rakyat sengsara", "rakyat susah", "rakyat miskin",
-                    "makin susah", "makin miskin", "gak bisa makan", "tidak bisa makan"]),
-        ("bagus", ["rakyat sengsara", "rakyat susah", "harga naik", "makin mahal"]),
-        ("mantap", ["rakyat sengsara", "PHK", "harga naik", "korupsi"]),
-        ("keren", ["rakyat sengsara", "rakyat susah", "harga naik"]),
-        ("luar biasa", ["rakyat sengsara", "rakyat susah", "korupsi", "gagal"]),
-        ("bravo", ["rakyat sengsara", "rakyat susah", "gagal"]),
-        ("sukses", ["menghancurkan", "merusak", "merugikan", "memiskinkan"]),
+                    "makin susah", "makin miskin", "gak bisa makan", "tidak bisa makan",
+                    "untuk pejabat", "untuk oligarki", "buat korupsi", "buat konglomerat",
+                    "miskinkan rakyat", "merugikan kecil", "menguntungkan besar"]),
+        ("bagus", ["rakyat sengsara", "rakyat susah", "harga naik", "makin mahal",
+                    "untuk pejabat", "buat korupsi", "buat konglomerat", "utang naik"]),
+        ("mantap", ["rakyat sengsara", "phk", "harga naik", "korupsi",
+                    "rakyat miskin", "utang naik", "inflasi", "menguntungkan besar"]),
+        ("keren", ["rakyat sengsara", "rakyat susah", "harga naik",
+                    "stunting naik", "miskinkan rakyat"]),
+        ("luar biasa", ["rakyat sengsara", "rakyat susah", "korupsi", "gagal",
+                        "utang naik", "inflasi", "harga naik"]),
+        ("bravo", ["rakyat sengsara", "rakyat susah", "gagal", "korupsi"]),
+        ("sukses", ["menghancurkan", "merusak", "merugikan", "memiskinkan",
+                    "menguntungkan konglomerat", "menguntungkan oligarki"]),
+        ("bagus sekali", ["rakyat sengsara", "rakyat susah", "harga naik", "stunting naik"]),
+        ("mantap sekali", ["rakyat miskin", "utang naik", "harga naik", "phk"]),
+        ("hebat sekali", ["miskinkan rakyat", "merugikan kecil", "menguntungkan besar"]),
+        ("makan gratis", ["stunting naik", "makanan basi", "kualitas buruk", "tidak bergizi",
+                          "hambur anggaran", "uang rakyat dipakai", "pencitraan"]),
+        ("makan bergizi", ["stunting naik", "makanan basi", "kualitas buruk", "tidak bergizi",
+                           "hambur anggaran", "pencitraan"]),
+        ("program terbaik", ["stunting naik", "gagal", "korupsi", "hambur uang", "pencitraan"]),
+        ("pro rakyat", ["oligarki", "konglomerat", "korupsi", "miskinkan", "merugikan kecil"]),
+        ("semangat", ["harga naik", "susah hidup", "miskin", "utang", "inflasi"]),
     ]
 
     # ── KATA NEGASI (membalikkan sentimen kata berikutnya) ──
     NEGASI_WORDS = {
-        "tidak", "gak", "ga", "gk", "ngga", "nggak", "bukan",
+        "tidak", "gk", "ga", "gk", "ngga", "nggak", "bukan",
         "belum", "jangan", "tanpa", "tak", "enggak", "kagak",
-        "bukanlah", "tidaklah", "takkan", "takkan",
+        "bukanlah", "tidaklah", "takkan",
     }
 
     # ── KATA KONTRADIKSI/TRANSISI (menandai perubahan arah sentimen) ──
@@ -373,45 +447,77 @@ class SmartSentimentLabeler:
         "meskipun", "walaupun", "walau", "kendati",
         "sementara", "padahal", "sebaliknya", "justru",
         "malah", "malahan", "nyatanya", "kenyataannya",
+        "tp", "cuma", "hanya", "sekadar", "nggak lebih", "ga lebih", "gak lebih"
+    }
+
+    # ── EMOJI SARKASME (emoji positif di konteks negatif = sarkasme) ──
+    SARKASME_EMOJI = {
+        "😂", "🤣", "😭", "😹", "😆", "😅", "🙃", "😏", "😒", "🙄", "😑", "😐"
+    }
+
+    # ── EMOJI NEGATIF EKSPLISIT ──
+    NEGATIF_EMOJI_EXPLICIT = {
+        "😡", "😤", "🤬", "👎", "😢", "😭", "💀", "☠️", "😠",
+        "🤮", "😷", "💔", "❌", "🚫", "😞", "😔", "😒", "🙄"
+    }
+
+    # ── EMOJI POSITIF EKSPLISIT ──
+    POSITIF_EMOJI_EXPLICIT = {
+        "👍", "🙏", "💪", "❤️", "😊", "😍", "🥰", "😁",
+        "🔥", "✨", "🌟", "🎉", "🇮🇩", "✅", "👏", "🙌"
     }
 
     def __init__(self, verbose: bool = False):
         self.verbose = verbose
 
-    def _detect_sarcasm(self, text_lower: str) -> bool:
+    def _detect_sarcasm(self, text_lower: str, original_text: str = "") -> bool:
         """
         THINKING STEP 3: Analisis Sarkasme & Konteks Budaya
         Netizen Indonesia sering menggunakan kata positif untuk menyindir.
-        Contoh: "Hebat sekali kebijakannya, rakyat makin rajin puasa
-                 karena tidak bisa beli makan" → NEGATIF
         """
+        # Cek pola sarkasme berbasis kata
         for trigger, negative_contexts in self.SARKASME_PATTERNS:
             if trigger in text_lower:
                 for context in negative_contexts:
                     if context in text_lower:
                         return True
+
+        # Cek emoji sarkasme: emoji "positif" (😂🤣😭) di teks yg mengandung kata negatif
+        has_negative_word = any(w in text_lower for w in self.NEGATIF_WORDS)
+        has_negative_phrase = any(p in text_lower for p in self.NEGATIF_PHRASES)
+        has_sarcasm_emoji = any(e in original_text for e in self.SARKASME_EMOJI)
+
+        if has_sarcasm_emoji and (has_negative_word or has_negative_phrase):
+            return True
+
+        # Cek pola: kata positif + emoji sarkasme di akhir
+        for trigger in [p[0] for p in self.SARKASME_PATTERNS]:
+            if trigger in text_lower:
+                for emoji in self.SARKASME_EMOJI:
+                    if emoji in original_text:
+                        # Cek apakah emoji muncul SETELAH kata trigger
+                        trigger_idx = text_lower.find(trigger)
+                        emoji_idx = original_text.find(emoji)
+                        if emoji_idx > trigger_idx:
+                            return True
+
         return False
 
     def _apply_negation(self, tokens: list) -> tuple:
         """
         THINKING STEP 2: Deteksi Negasi
         Jika ada kata negasi sebelum kata positif, maka menjadi negatif.
-        Jika ada kata negasi sebelum kata negatif, maka menjadi positif.
-        Contoh: "tidak bagus" → negatif, "tidak gagal" → positif
         """
-        negated_pos = 0  # positif yang ter-negasi → jadi negatif
-        negated_neg = 0  # negatif yang ter-negasi → jadi positif
+        negated_pos = 0
+        negated_neg = 0
 
         for i, token in enumerate(tokens):
             if token in self.NEGASI_WORDS and i + 1 < len(tokens):
                 next_word = tokens[i + 1]
-                # Cek 2 kata ke depan untuk menangkap "tidak terlalu bagus"
-                next_two = tokens[i + 1] if i + 1 < len(tokens) else ""
                 if next_word in self.POSITIF_WORDS:
                     negated_pos += 1
                 elif next_word in self.NEGATIF_WORDS:
                     negated_neg += 1
-                # Cek kata ke-2 setelah negasi
                 if i + 2 < len(tokens):
                     second_word = tokens[i + 2]
                     if second_word in self.POSITIF_WORDS and next_word not in self.NEGATIF_WORDS:
@@ -421,20 +527,10 @@ class SmartSentimentLabeler:
 
         return negated_pos, negated_neg
 
-    def _score_with_position_weight(self, text_lower: str) -> tuple:
+    def _score_with_position_weight(self, text_lower: str, original_text: str = "") -> tuple:
         """
         THINKING STEP 4: Bobot Dampak Akhir (Net Sentiment Impact)
-        Kalimat di akhir teks memiliki bobot lebih tinggi karena biasanya
-        berisi kesimpulan dari opini netizen.
-        
-        Contoh:
-        "Programnya sebenarnya bagus, tapi kalau korupsi terus ya percuma"
-        → dominan: kekecewaan di akhir → NEGATIF
-        
-        "Awalnya saya ragu, tapi setelah dicoba ternyata sangat membantu"
-        → dominan: kepuasan di akhir → POSITIF
         """
-        # Bagi teks menjadi segmen berdasarkan kata kontradiksi
         segments = re.split(
             r'\b(?:' + '|'.join(re.escape(w) for w in self.KONTRADIKSI_WORDS) + r')\b',
             text_lower
@@ -442,62 +538,65 @@ class SmartSentimentLabeler:
 
         total_pos = 0.0
         total_neg = 0.0
-        total_netral = 0.0
 
         num_segments = len(segments)
         for idx, segment in enumerate(segments):
-            # Bobot: segmen terakhir mendapat bobot 1.5x
-            # Segmen setelah kata kontradiksi (tapi/namun) biasanya berisi sentimen utama
             weight = 1.5 if idx == num_segments - 1 and num_segments > 1 else 1.0
 
             seg_lower = segment.strip()
             if not seg_lower:
                 continue
 
-            # Hitung frasa positif
             for phrase in self.POSITIF_PHRASES:
                 if phrase in seg_lower:
-                    total_pos += weight * 2  # frasa bernilai 2x kata tunggal
+                    total_pos += weight * 2
 
-            # Hitung frasa negatif
             for phrase in self.NEGATIF_PHRASES:
                 if phrase in seg_lower:
                     total_neg += weight * 2
 
-            # Hitung frasa netral
-            for phrase in self.NETRAL_PHRASES:
-                if phrase in seg_lower:
-                    total_netral += weight * 2
-
-            # Hitung kata tunggal positif
-            seg_tokens = seg_lower.split()
-            for token in seg_tokens:
+            seg_clean = re.sub(r"[^\w\s-]", " ", seg_lower)
+            seg_tokens = seg_clean.split()
+            seg_normalized = [PreprocessorIndonesia.SLANG_DICT.get(t, t) for t in seg_tokens]
+            for token in seg_normalized:
                 if token in self.POSITIF_WORDS:
                     total_pos += weight
                 if token in self.NEGATIF_WORDS:
                     total_neg += weight
 
-        return total_pos, total_neg, total_netral
+        # ── TAMBAHAN: Skor emoji eksplisit ──
+        if original_text:
+            for emoji in self.POSITIF_EMOJI_EXPLICIT:
+                if emoji in original_text:
+                    total_pos += 1.5
+            for emoji in self.NEGATIF_EMOJI_EXPLICIT:
+                if emoji in original_text:
+                    total_neg += 1.5
+            # Emoji sarkasme (😂🤣😭) di konteks negatif → tambah negatif
+            for emoji in self.SARKASME_EMOJI:
+                if emoji in original_text:
+                    has_neg = any(w in text_lower for w in self.NEGATIF_WORDS) or \
+                              any(p in text_lower for p in self.NEGATIF_PHRASES)
+                    if has_neg:
+                        total_neg += 1.0
+
+        return total_pos, total_neg
 
     def _thinking_label(self, text: str) -> dict:
         """
-        FULL CHAIN-OF-THOUGHT REASONING
-        Proses berpikir lengkap untuk menentukan label sentimen.
-        
-        Returns dict berisi:
-        - label: str (positif/negatif/netral)
-        - confidence: str (tinggi/sedang/rendah)
-        - reasoning: str (penjelasan singkat)
-        - aspek_positif: list
-        - aspek_negatif: list
-        - is_sarcasm: bool
-        - is_ambiguous: bool
+        FULL CHAIN-OF-THROW REASONING
         """
         text_lower = text.lower().strip()
-        tokens = text_lower.split()
+        
+        # Bersihkan tanda baca dan lakukan normalisasi slang
+        text_clean_punc = re.sub(r"[^\w\s-]", " ", text_lower)
+        tokens_orig = text_clean_punc.split()
+        normalized_tokens = [PreprocessorIndonesia.SLANG_DICT.get(t, t) for t in tokens_orig]
+        text_normalized = " ".join(normalized_tokens)
+        token_set = set(normalized_tokens)
 
         result = {
-            "label": "netral",
+            "label": "positif",
             "confidence": "rendah",
             "reasoning": "",
             "aspek_positif": [],
@@ -506,27 +605,28 @@ class SmartSentimentLabeler:
             "is_ambiguous": False,
         }
 
-        if not text_lower or len(tokens) < 2:
+        has_sentiment_word = any(t in self.POSITIF_WORDS or t in self.NEGATIF_WORDS for t in normalized_tokens)
+        if not text_lower or (len(normalized_tokens) < 2 and not has_sentiment_word):
             result["reasoning"] = "Teks terlalu pendek untuk dianalisis"
             return result
 
-        # ── STEP 1: Identifikasi aspek positif & negatif ──
+        # ── STEP 1: Identifikasi aspek positif & negatif (exact match) ──
         for w in self.POSITIF_WORDS:
-            if w in text_lower:
+            if w in token_set:
                 result["aspek_positif"].append(w)
         for phrase in self.POSITIF_PHRASES:
-            if phrase in text_lower:
+            if phrase in text_normalized:
                 result["aspek_positif"].append(f"[frasa] {phrase}")
 
         for w in self.NEGATIF_WORDS:
-            if w in text_lower:
+            if w in token_set:
                 result["aspek_negatif"].append(w)
         for phrase in self.NEGATIF_PHRASES:
-            if phrase in text_lower:
+            if phrase in text_normalized:
                 result["aspek_negatif"].append(f"[frasa] {phrase}")
 
-        # ── STEP 2: Deteksi sarkasme ──
-        is_sarcasm = self._detect_sarcasm(text_lower)
+        # ── STEP 2: Deteksi sarkasme (pass original text for emoji check) ──
+        is_sarcasm = self._detect_sarcasm(text_normalized, text)
         result["is_sarcasm"] = is_sarcasm
         if is_sarcasm:
             result["label"] = "negatif"
@@ -535,46 +635,32 @@ class SmartSentimentLabeler:
             return result
 
         # ── STEP 3: Deteksi negasi ──
-        negated_pos, negated_neg = self._apply_negation(tokens)
+        negated_pos, negated_neg = self._apply_negation(normalized_tokens)
 
-        # ── STEP 4: Hitung skor dengan bobot posisi ──
-        pos_score, neg_score, netral_score = self._score_with_position_weight(text_lower)
+        # ── STEP 4: Hitung skor dengan bobot posisi + emoji ──
+        pos_score, neg_score = self._score_with_position_weight(text_normalized, text)
 
-        # Terapkan negasi: positif yang dinegasi menambah skor negatif, sebaliknya
+        # Terapkan negasi
         pos_score = pos_score - (negated_pos * 1.5) + (negated_neg * 1.0)
         neg_score = neg_score + (negated_pos * 1.5) - (negated_neg * 1.0)
 
-        # ── STEP 5: Deteksi frasa netral langsung ──
-        for phrase in self.NETRAL_PHRASES:
-            if phrase in text_lower:
-                netral_score += 2.0
-
-        # ── STEP 6: Tentukan label berdasarkan skor ──
+        # ── STEP 5: Tentukan label — hanya positif/negatif ──
         has_both = len(result["aspek_positif"]) > 0 and len(result["aspek_negatif"]) > 0
         result["is_ambiguous"] = has_both
 
-        # Cek apakah ada kata kontradiksi → jika iya, kalimat akhir lebih dominan
-        has_contradiction = any(w in text_lower for w in self.KONTRADIKSI_WORDS)
+        has_contradiction = any(w in text_normalized for w in self.KONTRADIKSI_WORDS)
 
+        # Jika ada kontradiksi dan aspek ganda, bobotkan segmen setelah kontradiksi 2x
         if has_contradiction and has_both:
-            # Ada kontradiksi + ambigu → sentimen akhir menentukan
-            result["reasoning"] = "Teks ambigu (positif+negatif) dengan kata kontradiksi; kalimat akhir diutamakan"
+            result["reasoning"] = "Teks ambigu dengan kata kontradiksi; segmen pasca-kontradiksi didominasi negatif"
+            # Tambah bobot negatif ekstra untuk kasus kontradiksi
+            if neg_score > 0:
+                neg_score *= 1.3
         elif has_both:
             result["reasoning"] = "Teks mengandung aspek positif dan negatif; skor dominan digunakan"
 
-        # Threshold keputusan
         diff = abs(pos_score - neg_score)
-        if diff < 1.0 and netral_score >= 2.0:
-            result["label"] = "netral"
-            result["confidence"] = "sedang"
-            if not result["reasoning"]:
-                result["reasoning"] = "Skor positif dan negatif berimbang dengan indikator netral"
-        elif diff < 0.5:
-            result["label"] = "netral"
-            result["confidence"] = "rendah"
-            if not result["reasoning"]:
-                result["reasoning"] = "Skor hampir seimbang, dilabeli netral"
-        elif neg_score > pos_score:
+        if neg_score > pos_score:
             result["label"] = "negatif"
             result["confidence"] = "tinggi" if diff > 3.0 else "sedang"
             if not result["reasoning"]:
@@ -585,10 +671,11 @@ class SmartSentimentLabeler:
             if not result["reasoning"]:
                 result["reasoning"] = f"Skor positif dominan ({pos_score:.1f} vs {neg_score:.1f})"
         else:
-            result["label"] = "netral"
+            # Tie: default ke NEGATIF (lebih konservatif untuk kebijakan)
+            result["label"] = "negatif"
             result["confidence"] = "rendah"
             if not result["reasoning"]:
-                result["reasoning"] = "Tidak ada indikator sentimen yang cukup kuat"
+                result["reasoning"] = "Skor identik, default negatif (konservatif)"
 
         return result
 
@@ -636,19 +723,79 @@ class NaiveBayesSentimen:
     - ComplementNB: cocok untuk data tidak seimbang (REKOMENDASI)
     """
 
-    def __init__(self, nb_type: str = "complement"):
-        nb_clf = ComplementNB() if nb_type == "complement" else MultinomialNB()
+    def __init__(self, nb_type: str = "complement", model_type: str = "sgd_log",
+                 use_online: bool = True, use_char_ngrams: bool = True):
+        """
+        Parameters
+        ----------
+        nb_type : str
+            Legacy param: "complement" | "multinomial" (hanya dipakai jika model_type="auto")
+        model_type : str
+            "auto" | "complement" | "multinomial" | "sgd_log" | "sgd_hinge" | "sgd_huber"
+            Default: "sgd_log" (Logistic Regression, support partial_fit + char n-grams)
+        use_online : bool
+            True → aktifkan partial_fit (hanya untuk sgd_*). Default: True
+        use_char_ngrams : bool
+            True → pakai character n-grams (tangkapi typo/slang non-kamus). Default: True
+        """
+        self.use_online = use_online
+        self.model_type = model_type
+        self.use_char_ngrams = use_char_ngrams
+
+        # Resolve model_type
+        if model_type == "auto":
+            if use_online:
+                model_type = "sgd_log"
+            elif nb_type == "complement":
+                model_type = "complement"
+            else:
+                model_type = "multinomial"
+
+        # TF-IDF config
+        if use_char_ngrams:
+            tfidf_kwargs = dict(
+                ngram_range=(2, 5),
+                max_features=30000,
+                min_df=2,
+                max_df=0.85,
+                sublinear_tf=True,
+                analyzer="char_wb",
+            )
+        else:
+            tfidf_kwargs = dict(
+                ngram_range=(1, 2),
+                max_features=15000,
+                min_df=2,
+                max_df=0.85,
+                sublinear_tf=True,
+                analyzer="word",
+            )
+
+        # Pilih classifier
+        if model_type in ("sgd_log", "sgd_hinge", "sgd_huber"):
+            loss_map = {
+                "sgd_log": "log_loss",
+                "sgd_hinge": "hinge",
+                "sgd_huber": "modified_huber",
+            }
+            clf = SGDClassifier(
+                loss=loss_map[model_type],
+                penalty="l2",
+                alpha=1e-4,
+                max_iter=1000,
+                tol=1e-3,
+                random_state=42,
+                learning_rate="optimal",
+                # NOTE: partial_fit tidak support class_weight='balanced'
+            )
+        elif model_type == "multinomial":
+            clf = MultinomialNB()
+        else:  # complement
+            clf = ComplementNB()
 
         self.pipeline = Pipeline([
-            ("tfidf", TfidfVectorizer(
-                ngram_range=(1, 2),        # unigram + bigram
-                max_features=15000,         # top 15k fitur
-                min_df=2,                   # minimal muncul di 2 dokumen
-                max_df=0.85,                # abaikan kata terlalu umum (>85%)
-                sublinear_tf=True,          # log TF untuk normalisasi
-                analyzer="word"
-            )),
-            ("clf", nb_clf)
+            ("tfidf", TfidfVectorizer(**tfidf_kwargs)),
+            ("clf", clf)
         ])
         self.label_encoder = LabelEncoder()
         self.is_trained = False
@@ -723,6 +870,41 @@ class NaiveBayesSentimen:
 
         return train_acc, {}
 
+    def partial_fit(self, texts: list, labels: list):
+        """
+        Online / incremental learning.
+        Update model dengan data baru tanpa retrain dari awal.
+
+        NOTE: TF-IDF vocabulary tetap (dari training pertama).
+              Hanya classifier weights yang diupdate.
+        """
+        clf = self.pipeline.named_steps["clf"]
+        if not hasattr(clf, "partial_fit"):
+            raise RuntimeError(
+                f"Classifier '{type(clf).__name__}' tidak mendukung partial_fit. "
+                "Gunakan --model-type sgd_log / sgd_hinge / sgd_huber"
+            )
+
+        if not self.is_trained:
+            # First call: fit TF-IDF + encoder + partial_fit classifier
+            self.label_encoder.fit(labels)
+            self.classes_ = self.label_encoder.classes_
+
+            X_tfidf = self.pipeline.named_steps["tfidf"].fit_transform(texts)
+            y_enc = self.label_encoder.transform(labels)
+
+            clf.partial_fit(X_tfidf, y_enc,
+                            classes=np.arange(len(self.classes_)))
+            self.is_trained = True
+            print(f"  [ONLINE] Initial fit: {len(texts)} samples, "
+                  f"classes={list(self.classes_)}")
+        else:
+            # Subsequent calls: transform only, then partial_fit
+            X_tfidf = self.pipeline.named_steps["tfidf"].transform(texts)
+            y_enc = self.label_encoder.transform(labels)
+            clf.partial_fit(X_tfidf, y_enc)
+            print(f"  [ONLINE] Updated with {len(texts)} samples")
+
     def predict(self, texts: list) -> list:
         """Prediksi label sentimen."""
         if not self.is_trained:
@@ -742,7 +924,9 @@ class NaiveBayesSentimen:
             "pipeline": self.pipeline,
             "label_encoder": self.label_encoder,
             "classes_": self.classes_,
-            "train_report": self.train_report
+            "train_report": self.train_report,
+            "model_type": getattr(self, "model_type", "auto"),
+            "use_char_ngrams": getattr(self, "use_char_ngrams", False),
         }, path)
         print(f"  [SAVED] Model disimpan ke {path}")
 
@@ -750,7 +934,10 @@ class NaiveBayesSentimen:
     def load(cls, path: str):
         """Load model dari file."""
         data = joblib.load(path)
-        obj = cls()
+        obj = cls(
+            model_type=data.get("model_type", "auto"),
+            use_char_ngrams=data.get("use_char_ngrams", False),
+        )
         obj.pipeline = data["pipeline"]
         obj.label_encoder = data["label_encoder"]
         obj.classes_ = data["classes_"]
@@ -763,7 +950,7 @@ class NaiveBayesSentimen:
 #  4. ANALISIS & VISUALISASI
 # ─────────────────────────────────────────────
 def hitung_distribusi_sentimen(df: pd.DataFrame, kolom_label: str = "sentimen") -> pd.DataFrame:
-    """Hitung persentase positif/negatif/netral per topik."""
+    """Hitung persentase positif/negatif per topik."""
     hasil = []
     for topik, group in df.groupby("topik"):
         total = len(group)
@@ -771,18 +958,15 @@ def hitung_distribusi_sentimen(df: pd.DataFrame, kolom_label: str = "sentimen") 
 
         positif = counts.get("positif", 0)
         negatif = counts.get("negatif", 0)
-        netral  = counts.get("netral", 0)
 
         hasil.append({
             "topik": topik,
             "total_data": total,
             "negatif_count": negatif,
-            "netral_count": netral,
             "positif_count": positif,
             "negatif_pct": round(negatif / total * 100, 2),
-            "netral_pct": round(netral / total * 100, 2),
             "positif_pct": round(positif / total * 100, 2),
-            "sentimen_dominan": counts.idxmax() if not counts.empty else "netral"
+            "sentimen_dominan": counts.idxmax() if not counts.empty else "positif"
         })
     return pd.DataFrame(hasil)
 
@@ -793,15 +977,13 @@ def plot_distribusi_sentimen(df_ringkasan: pd.DataFrame, output_dir: str = "./ha
 
     topik_labels = [t.replace("_", "\n").title() for t in df_ringkasan["topik"]]
     x = np.arange(len(topik_labels))
-    width = 0.25
+    width = 0.35
 
-    colors = {"negatif": "#e74c3c", "netral": "#f39c12", "positif": "#27ae60"}
+    colors = {"negatif": "#e74c3c", "positif": "#27ae60"}
 
-    bars1 = ax.bar(x - width, df_ringkasan["negatif_pct"], width,
+    bars1 = ax.bar(x - width/2, df_ringkasan["negatif_pct"], width,
                    label="Negatif", color=colors["negatif"], edgecolor="white", linewidth=0.5)
-    bars2 = ax.bar(x, df_ringkasan["netral_pct"], width,
-                   label="Netral", color=colors["netral"], edgecolor="white", linewidth=0.5)
-    bars3 = ax.bar(x + width, df_ringkasan["positif_pct"], width,
+    bars2 = ax.bar(x + width/2, df_ringkasan["positif_pct"], width,
                    label="Positif", color=colors["positif"], edgecolor="white", linewidth=0.5)
 
     def autolabel(bars):
@@ -814,7 +996,6 @@ def plot_distribusi_sentimen(df_ringkasan: pd.DataFrame, output_dir: str = "./ha
 
     autolabel(bars1)
     autolabel(bars2)
-    autolabel(bars3)
 
     ax.set_xlabel("Topik Kebijakan", fontsize=12, labelpad=10)
     ax.set_ylabel("Persentase (%)", fontsize=12)
@@ -855,8 +1036,8 @@ def plot_pie_per_topik(df: pd.DataFrame, output_dir: str = "./hasil/plots"):
     else:
         axes = [ax for row in axes for ax in row]
 
-    colors_pie = ["#e74c3c", "#f39c12", "#27ae60"]
-    label_order = ["negatif", "netral", "positif"]
+    colors_pie = ["#e74c3c", "#27ae60"]
+    label_order = ["negatif", "positif"]
 
     for i, topik in enumerate(topik_list):
         group = df[df["topik"] == topik]["sentimen"].value_counts()
@@ -866,7 +1047,7 @@ def plot_pie_per_topik(df: pd.DataFrame, output_dir: str = "./hasil/plots"):
                   for l in labels]
 
         ax = axes[i]
-        wedges, texts, autotexts = ax.pie(
+        wedges, texts, autotexts = ax.pie(  # type: ignore
             sizes, labels=labels, colors=colors,
             autopct="%1.1f%%", startangle=90,
             textprops={"fontsize": 10}
@@ -897,7 +1078,7 @@ def plot_confusion_matrix(cm_data: list, classes: list, output_dir: str = "./has
                 linewidths=0.5, ax=ax)
     ax.set_xlabel("Prediksi", fontsize=12)
     ax.set_ylabel("Aktual", fontsize=12)
-    ax.set_title("Confusion Matrix — Naive Bayes\nAnalisis Sentimen Kebijakan Pemerintah",
+    ax.set_title("Confusion Matrix - Naive Bayes\nAnalisis Sentimen Kebijakan Pemerintah",
                  fontsize=12, fontweight="bold")
     plt.tight_layout()
     path = os.path.join(output_dir, "confusion_matrix.png")
@@ -917,7 +1098,6 @@ def generate_wordcloud(df: pd.DataFrame, output_dir: str = "./hasil/plots"):
     sentimen_colors = {
         "negatif": "Reds",
         "positif": "Greens",
-        "netral": "Blues"
     }
 
     for sentimen, colormap in sentimen_colors.items():
@@ -953,23 +1133,22 @@ def print_ringkasan(df_ringkasan: pd.DataFrame):
     print("  RINGKASAN DISTRIBUSI SENTIMEN (NAIVE BAYES + TF-IDF)")
     print("=" * 80)
     header = (f"  {'Topik Kebijakan':<28} {'Total':>7} "
-              f"{'Negatif':>10} {'Netral':>9} {'Positif':>9} {'Dominan':>9}")
+              f"{'Negatif':>10} {'Positif':>9} {'Dominan':>9}")
     print(header)
-    print("  " + "-" * 75)
+    print("  " + "-" * 65)
     for _, row in df_ringkasan.iterrows():
         topik_display = row["topik"].replace("_", " ").title()[:27]
         print(f"  {topik_display:<26} {row['total_data']:>7} "
-              f"{row['negatif_pct']:>8.2f}%  {row['netral_pct']:>7.2f}%  "
+              f"{row['negatif_pct']:>8.2f}%  "
               f"{row['positif_pct']:>7.2f}%  {row['sentimen_dominan']:>8}")
-    print("  " + "-" * 75)
+    print("  " + "-" * 65)
 
     # Hitung total keseluruhan
     total_all = df_ringkasan["total_data"].sum()
     neg_all = df_ringkasan["negatif_count"].sum()
-    neu_all = df_ringkasan["netral_count"].sum()
     pos_all = df_ringkasan["positif_count"].sum()
     print(f"  {'TOTAL KESELURUHAN':<26} {total_all:>7} "
-          f"{neg_all/total_all*100:>8.2f}%  {neu_all/total_all*100:>7.2f}%  "
+          f"{neg_all/total_all*100:>8.2f}%  "
           f"{pos_all/total_all*100:>7.2f}%")
     print("=" * 80)
 
@@ -1013,72 +1192,52 @@ def buat_data_sample() -> pd.DataFrame:
         # Prabowo-Gibran
         ("prabowo_gibran", "kebijakan prabowo gibran bagus untuk rakyat indonesia maju", "positif"),
         ("prabowo_gibran", "100 hari prabowo gagal tidak ada perubahan berarti", "negatif"),
-        ("prabowo_gibran", "pemerintahan prabowo gibran perlu waktu evaluasi lebih lanjut", "netral"),
         ("prabowo_gibran", "prabowo presiden terbaik indonesia makmur sejahtera", "positif"),
         ("prabowo_gibran", "kecewa dengan kabinet prabowo korupsi merajalela lagi", "negatif"),
-        ("prabowo_gibran", "menunggu hasil kerja prabowo gibran satu tahun pertama", "netral"),
         ("prabowo_gibran", "program kerja prabowo pro rakyat kecil mendukung penuh", "positif"),
         ("prabowo_gibran", "prabowo bohong janji kampanye tidak ditepati rakyat kecewa", "negatif"),
-        ("prabowo_gibran", "pemerintahan baru masih adaptasi wajar ada hambatan awal", "netral"),
         ("prabowo_gibran", "prabowo gibran melanjutkan pembangunan IKN dengan baik sekali", "positif"),
         ("prabowo_gibran", "harga sembako naik terus sejak prabowo menjabat susah hidup", "negatif"),
-        ("prabowo_gibran", "kebijakan ekonomi prabowo masih dikaji dampaknya ke rakyat", "netral"),
 
         # Omnibus Law
         ("omnibus_law", "omnibus law cipta kerja merugikan buruh tidak pro rakyat kecil", "negatif"),
         ("omnibus_law", "omnibus law membuka lapangan kerja investasi meningkat pesat", "positif"),
-        ("omnibus_law", "omnibus law masih perlu kajian mendalam dampak terhadap lingkungan", "netral"),
         ("omnibus_law", "tolak omnibus law hidup buruh terancam kebijakan deregulasi", "negatif"),
         ("omnibus_law", "omnibus law memudahkan izin usaha UMKM berkembang lebih cepat", "positif"),
-        ("omnibus_law", "omnibus law masih diperdebatkan semua pihak perlu diskusi terbuka", "netral"),
         ("omnibus_law", "UU cipta kerja melanggar hak buruh upah minimum dihapus", "negatif"),
         ("omnibus_law", "investasi meningkat berkat omnibus law ekonomi tumbuh signifikan", "positif"),
-        ("omnibus_law", "omnibus law perlu sosialisasi lebih luas kepada masyarakat buruh", "netral"),
         ("omnibus_law", "omnibus law merusak lingkungan izin tambang diberikan dengan mudah", "negatif"),
         ("omnibus_law", "omnibus law bikin iklim investasi kondusif mantap pemerintah", "positif"),
-        ("omnibus_law", "implementasi omnibus law di daerah masih belum merata sempurna", "netral"),
 
         # Danantara
         ("danantara", "danantara investasi BUMN rawan korupsi tidak transparan bahaya", "negatif"),
         ("danantara", "danantara bisa dorong ekonomi nasional maju pesat", "positif"),
-        ("danantara", "danantara masih dalam tahap pembentukan perlu dipantau terus", "netral"),
         ("danantara", "dana rakyat dipakai danantara tanpa pengawasan yang jelas", "negatif"),
         ("danantara", "danantara pemerintah berkomitmen perbaiki tata kelola BUMN profesional", "positif"),
-        ("danantara", "danantara perlu regulasi yang kuat baru bisa jalan dengan baik", "netral"),
         ("danantara", "danantara proyek korupsi baru oligarki menguasai aset BUMN", "negatif"),
         ("danantara", "danantara bisa jadi solusi pengelolaan aset negara yang optimal", "positif"),
-        ("danantara", "konsep danantara bagus tapi implementasi menentukan hasilnya", "netral"),
         ("danantara", "danantara ancaman privatisasi BUMN terselubung berbahaya", "negatif"),
         ("danantara", "danantara bikin BUMN lebih kompetitif di pasar global hebat", "positif"),
-        ("danantara", "danantara masih baru belum bisa dinilai berhasil atau gagal", "netral"),
 
         # Makan Bergizi Gratis
         ("makan_bergizi_gratis", "program makan bergizi gratis sangat membantu siswa miskin", "positif"),
         ("makan_bergizi_gratis", "makan bergizi gratis amburadul banyak yang tidak layak makan", "negatif"),
-        ("makan_bergizi_gratis", "MBG program bagus tapi implementasi perlu diperbaiki terus", "netral"),
         ("makan_bergizi_gratis", "makan bergizi gratis sia sia anggaran habis gizi tidak terpenuhi", "negatif"),
         ("makan_bergizi_gratis", "anak sekolah senang dapat makan bergizi gratis tiap hari sehat", "positif"),
-        ("makan_bergizi_gratis", "program MBG baru berjalan evaluasi terus dilakukan pemerintah", "netral"),
         ("makan_bergizi_gratis", "makan gratis sekolah mengurangi stunting generasi muda sehat kuat", "positif"),
         ("makan_bergizi_gratis", "kualitas makan bergizi gratis buruk tidak layak konsumsi parah", "negatif"),
-        ("makan_bergizi_gratis", "makan bergizi gratis memerlukan pengawasan distribusi ketat", "netral"),
         ("makan_bergizi_gratis", "MBG program terbaik prabowo anak sekolah jadi semangat belajar", "positif"),
         ("makan_bergizi_gratis", "makanan MBG sering basi anak sekolah sakit perut keracunan", "negatif"),
-        ("makan_bergizi_gratis", "MBG masih tahap awal wajar ada kendala teknis di lapangan", "netral"),
 
         # Efisiensi Anggaran
         ("efisiensi_anggaran", "pemangkasan anggaran merugikan pendidikan kesehatan rakyat kecil", "negatif"),
         ("efisiensi_anggaran", "efisiensi anggaran diperlukan untuk mengurangi pemborosan negara", "positif"),
-        ("efisiensi_anggaran", "efisiensi anggaran 2025 perlu kajian dampak sosial lebih lanjut", "netral"),
         ("efisiensi_anggaran", "pemotongan anggaran gaji guru dipotong sangat kecewa sekali", "negatif"),
         ("efisiensi_anggaran", "efisiensi anggaran pemerintah hemat dorong produktivitas tinggi", "positif"),
-        ("efisiensi_anggaran", "anggaran 2025 dipangkas dampaknya masih belum terasa langsung", "netral"),
         ("efisiensi_anggaran", "efisiensi anggaran birokrasi ramping korupsi berkurang signifikan", "positif"),
         ("efisiensi_anggaran", "pemotongan anggaran pelayanan publik menurun drastis parah", "negatif"),
-        ("efisiensi_anggaran", "kebijakan efisiensi anggaran masih perlu dievaluasi dampaknya", "netral"),
         ("efisiensi_anggaran", "anggaran sosial dipotong rakyat kecil semakin susah hidup", "negatif"),
         ("efisiensi_anggaran", "efisiensi anggaran bikin pejabat gak bisa foya pakai uang negara", "positif"),
-        ("efisiensi_anggaran", "efisiensi anggaran perlu keseimbangan jangan asal potong saja", "netral"),
     ]
 
     # Duplikasi 8x dengan variasi kecil
@@ -1097,6 +1256,227 @@ def buat_data_sample() -> pd.DataFrame:
 # ─────────────────────────────────────────────
 #  MAIN PIPELINE
 # ─────────────────────────────────────────────
+def _retrain_from_feedback(
+    dataset_path: str,
+    feedback_path: str,
+    model_type: str = "auto",
+    use_online: bool = False,
+    use_char_ngrams: bool = False,
+    no_stem: bool = False,
+    test_size: float = 0.2,
+):
+    """
+    Retrain model dari dataset asli + feedback history user.
+    """
+    print("\n" + "=" * 65)
+    print("  RETRAIN MODEL DARI DATASET + FEEDBACK HISTORY")
+    print("=" * 65)
+
+    preprocessor = PreprocessorIndonesia(use_stemming=not no_stem)
+
+    # 1. Load & preprocess dataset asli
+    df_main = None
+    if os.path.exists(dataset_path):
+        print(f"\n  [*] Loading dataset: {dataset_path}")
+        df_main = pd.read_csv(dataset_path, encoding="utf-8-sig")
+        print(f"      -> {len(df_main)} rows from dataset")
+
+        text_col = pilih_kolom_teks(df_main)
+        label_col = find_label_column(df_main)
+
+        if label_col is None:
+            print("  [INFO] Melabeli dataset otomatis...")
+            labeler = SmartSentimentLabeler()
+            df_main["sentimen_auto"] = labeler.label_batch(
+                df_main[text_col].fillna("").astype(str).tolist()
+            )
+            label_col = "sentimen_auto"
+
+        df_main["text_clean"] = preprocessor.preprocess_batch(
+            df_main[text_col].fillna("").astype(str).tolist()
+        )
+
+        if label_col != "sentimen":
+            df_main["sentimen"] = df_main[label_col]
+    else:
+        print(f"  [WARN] Dataset tidak ditemukan: {dataset_path}")
+
+    # 2. Load feedback history (already preprocessed)
+    df_fb = None
+    if os.path.exists(feedback_path):
+        print(f"\n  [*] Loading feedback history: {feedback_path}")
+        df_fb = pd.read_csv(feedback_path, encoding="utf-8-sig")
+        if not df_fb.empty:
+            print(f"      -> {len(df_fb)} rows from feedback history")
+            if "sentimen" in df_fb.columns:
+                dist = df_fb["sentimen"].value_counts().to_dict()
+                print(f"      -> Feedback distribution: {dist}")
+            # Ensure text_clean exists
+            if "text_clean" not in df_fb.columns:
+                text_col = pilih_kolom_teks(df_fb)
+                df_fb["text_clean"] = preprocessor.preprocess_batch(
+                    df_fb[text_col].fillna("").astype(str).tolist()
+                )
+    else:
+        print(f"\n  [WARN] Feedback history tidak ditemukan: {feedback_path}")
+
+    parts = [df_main, df_fb]
+    parts = [p for p in parts if p is not None and not p.empty]
+    if not parts:
+        print("  [ERROR] Tidak ada data untuk retrain!")
+        return
+
+    df = pd.concat(parts, ignore_index=True)
+
+    # Dedup by text_clean (safe: both parts now have it)
+    df.drop_duplicates(subset=["text_clean"], keep="last", inplace=True)
+    print(f"\n  [*] Total after merge + dedup: {len(df)} rows")
+
+    # 3. Normalize labels
+    df["sentimen"] = df["sentimen"].str.lower().str.strip()
+    df["sentimen"] = df["sentimen"].replace({
+        "negative": "negatif", "neg": "negatif",
+        "positive": "positif", "pos": "positif",
+        "neutral": "negatif", "neu": "negatif",
+        "netral": "negatif",
+    })
+    df = df[df["sentimen"].isin(["positif", "negatif"])].reset_index(drop=True)
+    df = df[df["text_clean"].str.strip() != ""].reset_index(drop=True)
+    print(f"  Label distribution: {df['sentimen'].value_counts().to_dict()}")
+
+    if len(df) < 5:
+        print("  [ERROR] Data terlalu sedikit untuk retrain.")
+        return
+
+    # 4. Train model
+    X = df["text_clean"].tolist()
+    y = df["sentimen"].tolist()
+
+    min_class = df["sentimen"].value_counts().min()
+    n_classes = df["sentimen"].nunique()
+    can_split = len(df) >= 30 and min_class >= 2 and int(len(df) * test_size) >= n_classes
+
+    if not can_split:
+        print(f"  [INFO] Data terbatas ({len(df)} rows, {n_classes} classes, "
+              f"min_class={min_class}). Full data for training.")
+        X_train, X_test, y_train, y_test = X, [], y, []
+    else:
+        stratify_labels = y if min_class >= 2 else None
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size,
+            stratify=stratify_labels, random_state=42,
+        )
+        print(f"\n  Split: {len(X_train)} train / {len(X_test)} test")
+
+    model = NaiveBayesSentimen(
+        model_type=model_type,
+        use_online=use_online,
+        use_char_ngrams=use_char_ngrams,
+    )
+    model.train(X_train, y_train, X_test or None, y_test or None)
+
+    # 5. Save model
+    model.save("./hasil/model_nb.pkl")
+
+    # 6. Ringkasan
+    df["sentimen_pred"] = model.predict(X)
+    if "topik" not in df.columns:
+        df["topik"] = "feedback_retrain"
+    df_ringkasan = hitung_distribusi_sentimen(df)
+    df_ringkasan.to_csv("./hasil/ringkasan_topik.csv", index=False, encoding="utf-8-sig")
+    print_ringkasan(df_ringkasan)
+    print("\n  [DONE] Retrain selesai! Model diperbarui.")
+
+
+def find_label_column(df: pd.DataFrame) -> str | None:
+    """Cari kolom label sentimen."""
+    for col in ["sentimen", "sentimen_manual", "label", "sentimen_auto"]:
+        if col in df.columns:
+            return col
+    return None
+
+
+def get_model_vocabulary(model: NaiveBayesSentimen) -> set[str]:
+    """Ambil vocabulary TF-IDF untuk cek kata yang sudah dikenal model."""
+    try:
+        return set(model.pipeline.named_steps["tfidf"].get_feature_names_out())
+    except Exception:
+        return set()
+
+
+def known_word_ratio(text_clean: str, vocabulary: set[str]) -> float:
+    """Hitung rasio token komentar yang pernah dikenal model."""
+    tokens = [token for token in text_clean.split() if token]
+    if not tokens:
+        return 0.0
+    if not vocabulary:
+        return 1.0
+    known = sum(1 for token in tokens if token in vocabulary)
+    return known / len(tokens)
+
+
+def predict_with_learning_model(
+    df_comments: pd.DataFrame,
+    model: NaiveBayesSentimen,
+    confidence_threshold: float = 0.45,
+    min_known_ratio: float = 0.25,
+    preprocessor: PreprocessorIndonesia = None,
+) -> pd.DataFrame:
+    """
+    Prediksi komentar dengan model ML, lalu fallback untuk teks yang kurang dipahami.
+    Mirip logika di scan_link.py.
+    """
+    fallback_labeler = SmartSentimentLabeler()
+
+    if model is None:
+        print("        [WARN] Model ML tidak tersedia. Memakai SmartSentimentLabeler untuk semua komentar.")
+        details = fallback_labeler.label_batch_with_detail(df_comments["text_clean"].tolist())
+        df_comments["sentimen_pred"] = [item["label"] for item in details]
+        df_comments["confidence"] = [item["confidence"] for item in details]
+        df_comments["confidence_score"] = 0.0
+        df_comments["known_word_ratio"] = 0.0
+        df_comments["metode_prediksi"] = "smart_labeler"
+        return df_comments
+
+    texts_clean = df_comments["text_clean"].tolist()
+    pred_labels = model.predict(texts_clean)
+    probas = model.predict_proba(texts_clean)
+    max_probas = probas.max(axis=1)
+    vocabulary = get_model_vocabulary(model)
+    known_ratios = [known_word_ratio(text, vocabulary) for text in texts_clean]
+
+    final_labels = []
+    confidence_names = []
+    methods = []
+    reasonings = []
+
+    for text_clean, pred, score, ratio in zip(texts_clean, pred_labels, max_probas, known_ratios):
+        if score < confidence_threshold or ratio < min_known_ratio:
+            detail = fallback_labeler.label_with_detail(text_clean)
+            final_labels.append(detail["label"])
+            confidence_names.append(detail["confidence"])
+            methods.append("fallback_smart_labeler")
+            reasonings.append(detail["reasoning"])
+        else:
+            final_labels.append(pred)
+            if score >= 0.70:
+                confidence_names.append("tinggi")
+            elif score >= confidence_threshold:
+                confidence_names.append("sedang")
+            else:
+                confidence_names.append("rendah")
+            methods.append("model_nb")
+            reasonings.append("Prediksi model ML")
+
+    df_comments["sentimen_pred"] = final_labels
+    df_comments["confidence"] = confidence_names
+    df_comments["confidence_score"] = max_probas
+    df_comments["known_word_ratio"] = known_ratios
+    df_comments["metode_prediksi"] = methods
+    df_comments["reasoning"] = reasonings
+    return df_comments
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Naive Bayes Sentimen Kebijakan Pemerintah Indonesia",
@@ -1125,6 +1505,14 @@ CONTOH PENGGUNAAN:
                         help="Gunakan data sample built-in untuk demo cepat")
     parser.add_argument("--nb-type", choices=["complement", "multinomial"], default="complement",
                         help="Jenis Naive Bayes (default: complement, lebih baik untuk imbalanced)")
+    parser.add_argument("--model-type", choices=["auto", "complement", "multinomial",
+                                                  "sgd_log", "sgd_hinge", "sgd_huber"],
+                        default="auto",
+                        help="Model classifier (default: auto = complement / sgd_log jika --use-online)")
+    parser.add_argument("--use-online", action="store_true",
+                        help="Aktifkan online learning (partial_fit), model -> sgd_log")
+    parser.add_argument("--use-char-ngrams", action="store_true",
+                        help="Pakai character n-grams (tangkap typo/slang non-kamus)")
     parser.add_argument("--test-size", type=float, default=0.2,
                         help="Proporsi test set (default: 0.2 = 80/20 split)")
     parser.add_argument("--no-stem", action="store_true",
@@ -1133,13 +1521,39 @@ CONTOH PENGGUNAAN:
                         help="Prediksi sentimen 1 kalimat baru")
     parser.add_argument("--load-model", type=str, default=None,
                         help="Load model tersimpan dari file .pkl")
+    parser.add_argument("--confidence-threshold", type=float, default=0.45,
+                        help="Ambang confidence model sebelum fallback smart labeler (default: 0.45)")
+    parser.add_argument("--min-known-ratio", type=float, default=0.25,
+                        help="Rasio minimal kata yang dikenal model sebelum fallback (default: 0.25)")
+    parser.add_argument("--retrain-feedback", action="store_true",
+                        help="Retrain model dari dataset asli + feedback history")
+    parser.add_argument("--feedback-path", type=str,
+                        default="./hasil_scanning/feedback_history.csv",
+                        help="Path ke feedback history CSV (default: ./hasil_scanning/feedback_history.csv)")
     args = parser.parse_args()
 
     print("\n" + "=" * 65)
     print("  ANALISIS SENTIMEN KEBIJAKAN PEMERINTAH INDONESIA")
-    print("  Metode: Naive Bayes + TF-IDF")
-    print("  Topik : 5 Kebijakan Pemerintah")
+    model_label = args.model_type if args.model_type != "auto" else (
+        "sgd_log" if args.use_online else
+        "complement" if args.nb_type == "complement" else "multinomial"
+    )
+    feats = "char_ngrams" if args.use_char_ngrams else "word_unigram+bigram"
+    print(f"  Model  : {model_label} | fitur={feats}")
+    print("  Topik  : 5 Kebijakan Pemerintah")
     print("=" * 65)
+
+    # ── Mode: retrain dari feedback history ──
+    if args.retrain_feedback:
+        return _retrain_from_feedback(
+            dataset_path=args.input,
+            feedback_path=args.feedback_path,
+            model_type=args.model_type,
+            use_online=args.use_online,
+            use_char_ngrams=args.use_char_ngrams,
+            no_stem=args.no_stem,
+            test_size=args.test_size,
+        )
 
     # ── Mode: prediksi kalimat tunggal dari model tersimpan ──
     if args.prediksi and args.load_model:
@@ -1160,6 +1574,69 @@ CONTOH PENGGUNAAN:
             bar = "█" * int(p * 30)
             print(f"    {cls:<10}: {p:.4f} ({p*100:.1f}%) {bar}")
         return
+
+    # ── Mode: load model terlatih + prediksi CSV input (mirip scan_link.py) ──
+    if args.input and args.load_model and not args.prediksi and not args.sample and not args.retrain_feedback:
+        print(f"\n  [*] Load model dari: {args.load_model}")
+        model = NaiveBayesSentimen.load(args.load_model)
+        preprocessor = PreprocessorIndonesia(use_stemming=not args.no_stem)
+
+        print(f"\n  [*] Membaca data dari: {args.input}")
+        df = pd.read_csv(args.input, encoding="utf-8-sig")
+        print(f"  Total data: {len(df):,} baris")
+        text_col = pilih_kolom_teks(df, args.text_col)
+        print(f"  Kolom teks: {text_col}")
+
+        if "topik" not in df.columns:
+            topik_default = os.path.splitext(os.path.basename(args.input))[0]
+            df["topik"] = topik_default
+            print(f"  [INFO] Kolom topik tidak ditemukan. Menggunakan topik: {topik_default}")
+
+        print("\n  [*] Preprocessing teks...")
+        df["text_clean"] = preprocessor.preprocess_batch(df[text_col].fillna("").astype(str).tolist())
+        df = df[df["text_clean"].str.strip() != ""].reset_index(drop=True)
+        print(f"  Setelah filter: {len(df):,} baris valid")
+
+        # Prediksi dengan confidence threshold + fallback (seperti scan_link.py)
+        print("  [*] Prediksi dengan model + fallback Smart Reasoning...")
+        df = predict_with_learning_model(
+            df, model,
+            confidence_threshold=args.confidence_threshold,
+            min_known_ratio=args.min_known_ratio,
+            preprocessor=preprocessor,
+        )
+
+        # Simpan hasil
+        output_csv = "./hasil/laporan_sentimen.csv"
+        df.to_csv(output_csv, index=False, encoding="utf-8-sig")
+        print(f"  [SAVED] Hasil prediksi -> {output_csv}")
+
+        # Ringkasan
+        df_ringkasan = hitung_distribusi_sentimen(df, kolom_label="sentimen_pred")
+        ringkasan_csv = "./hasil/ringkasan_topik.csv"
+        df_ringkasan.to_csv(ringkasan_csv, index=False, encoding="utf-8-sig")
+        print(f"  [SAVED] Ringkasan -> {ringkasan_csv}")
+        print_ringkasan(df_ringkasan)
+
+        # Visualisasi
+        print("\n  [*] Membuat visualisasi...")
+        plot_distribusi_sentimen(df_ringkasan)
+        # plot_pie_per_topik butuh kolom 'sentimen', gunakan sentimen_pred
+        df_viz = df.copy()
+        df_viz["sentimen"] = df_viz["sentimen_pred"]
+        plot_pie_per_topik(df_viz, "./hasil/plots")
+        generate_wordcloud(df_viz, "./hasil/plots")
+
+        print("\n  " + "=" * 55)
+        print("  [DONE] Prediksi CSV selesai!")
+        print(f"         Output  : ./hasil/")
+        print(f"         Plots   : ./hasil/plots/")
+        print("  " + "=" * 55)
+        return
+
+    if args.use_online:
+        print("\n  [INFO] Online learning mode aktif. Model akan support partial_fit.")
+        print("         Gunakan scan_link.py dengan feedback user untuk update model.")
 
     # ── Load / Generate Data ──
     if args.sample:
@@ -1221,9 +1698,10 @@ CONTOH PENGGUNAAN:
     df["sentimen"] = df["sentimen"].replace({
         "negative": "negatif", "neg": "negatif",
         "positive": "positif", "pos": "positif",
-        "neutral": "netral", "neu": "netral"
+        "neutral": "negatif", "neu": "negatif",
+        "netral": "negatif",
     })
-    df = df[df["sentimen"].isin(["positif", "negatif", "netral"])].reset_index(drop=True)
+    df = df[df["sentimen"].isin(["positif", "negatif"])].reset_index(drop=True)
     print(f"  Distribusi label final: {df['sentimen'].value_counts().to_dict()}")
 
     # ── Train / Test Split ──
@@ -1245,7 +1723,12 @@ CONTOH PENGGUNAAN:
           f"({int((1-args.test_size)*100)}/{int(args.test_size*100)})")
 
     # ── Training ──
-    model = NaiveBayesSentimen(nb_type=args.nb_type)
+    model = NaiveBayesSentimen(
+        nb_type=args.nb_type,
+        model_type=args.model_type,
+        use_online=args.use_online,
+        use_char_ngrams=args.use_char_ngrams,
+    )
     acc, report = model.train(X_train, y_train, X_test, y_test)
 
     # ── Prediksi seluruh dataset ──

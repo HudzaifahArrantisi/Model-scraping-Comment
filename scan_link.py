@@ -22,6 +22,7 @@ import os
 import sys
 import re
 import argparse
+from datetime import datetime
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
@@ -114,7 +115,7 @@ def plot_scan_sentimen(df: pd.DataFrame, file_prefix: str, output_dir: str = "./
     counts = df["sentimen_pred"].value_counts()
     
     # Warna estetis
-    colors = {"negatif": "#e74c3c", "netral": "#95a5a6", "positif": "#2ecc71"}
+    colors = {"negatif": "#e74c3c", "positif": "#2ecc71"}
     plot_colors = [colors.get(label, "#3498db") for label in counts.index]
     
     plt.figure(figsize=(8, 6), dpi=150)
@@ -148,7 +149,6 @@ def generate_scan_wordclouds(df: pd.DataFrame, file_prefix: str, output_dir: str
     sentimen_colors = {
         "negatif": "Reds",
         "positif": "Greens",
-        "netral": "Blues"
     }
 
     for sentimen, colormap in sentimen_colors.items():
@@ -179,11 +179,12 @@ def generate_scan_wordclouds(df: pd.DataFrame, file_prefix: str, output_dir: str
 
 
 def normalize_sentiment_labels(series: pd.Series) -> pd.Series:
-    """Normalisasi label sentimen ke format internal."""
+    """Normalisasi label sentimen ke format internal (hanya positif/negatif)."""
     return series.fillna("").astype(str).str.lower().str.strip().replace({
         "negative": "negatif", "neg": "negatif",
         "positive": "positif", "pos": "positif",
-        "neutral": "netral", "neu": "netral",
+        "neutral": "negatif", "neu": "negatif",
+        "netral": "negatif",
     })
 
 
@@ -195,7 +196,14 @@ def find_label_column(df: pd.DataFrame) -> str | None:
     return None
 
 
-def train_model_from_dataset(dataset_path: str, model_path: str, use_stemming: bool = True) -> NaiveBayesSentimen | None:
+def train_model_from_dataset(
+    dataset_path: str,
+    model_path: str,
+    use_stemming: bool = True,
+    model_type: str = "auto",
+    use_online: bool = False,
+    use_char_ngrams: bool = False,
+) -> NaiveBayesSentimen | None:
     """Latih model dari dataset lokal agar scanner belajar dari data sebelumnya."""
     if not os.path.exists(dataset_path):
         print(f"        [WARN] Dataset training tidak ditemukan: {dataset_path}")
@@ -217,7 +225,7 @@ def train_model_from_dataset(dataset_path: str, model_path: str, use_stemming: b
         label_col = "sentimen_auto"
 
     df_train["sentimen"] = normalize_sentiment_labels(df_train[label_col])
-    df_train = df_train[df_train["sentimen"].isin(["positif", "negatif", "netral"])].reset_index(drop=True)
+    df_train = df_train[df_train["sentimen"].isin(["positif", "negatif"])].reset_index(drop=True)
     if df_train.empty or df_train["sentimen"].nunique() < 2:
         print("        [WARN] Dataset training harus punya minimal 2 kelas sentimen valid.")
         return None
@@ -231,7 +239,12 @@ def train_model_from_dataset(dataset_path: str, model_path: str, use_stemming: b
         print("        [WARN] Dataset training terlalu sedikit untuk melatih model.")
         return None
 
-    model = NaiveBayesSentimen(nb_type="complement")
+    model = NaiveBayesSentimen(
+        nb_type="complement",
+        model_type=model_type,
+        use_online=use_online,
+        use_char_ngrams=use_char_ngrams,
+    )
     model.train(df_train["text_clean"].tolist(), df_train["sentimen"].tolist())
 
     os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
@@ -239,7 +252,15 @@ def train_model_from_dataset(dataset_path: str, model_path: str, use_stemming: b
     return model
 
 
-def load_or_train_model(model_path: str, dataset_path: str, force_retrain: bool, use_stemming: bool = True) -> NaiveBayesSentimen | None:
+def load_or_train_model(
+    model_path: str,
+    dataset_path: str,
+    force_retrain: bool,
+    use_stemming: bool = True,
+    model_type: str = "auto",
+    use_online: bool = False,
+    use_char_ngrams: bool = False,
+) -> NaiveBayesSentimen | None:
     """Load model tersimpan, atau latih ulang otomatis dari dataset jika perlu."""
     model_exists = os.path.exists(model_path)
     dataset_exists = os.path.exists(dataset_path)
@@ -253,7 +274,13 @@ def load_or_train_model(model_path: str, dataset_path: str, force_retrain: bool,
         else:
             print("        Dataset lebih baru dari model. Scanner akan update model otomatis.")
 
-        model = train_model_from_dataset(dataset_path, model_path, use_stemming=use_stemming)
+        model = train_model_from_dataset(
+            dataset_path, model_path,
+            use_stemming=use_stemming,
+            model_type=model_type,
+            use_online=use_online,
+            use_char_ngrams=use_char_ngrams,
+        )
         if model is not None:
             return model
 
@@ -338,6 +365,108 @@ def predict_comments_with_learning_model(
     return df_comments
 
 
+def active_learning_correction_loop(
+    df: pd.DataFrame,
+    model,
+    file_prefix: str,
+    min_confidence: float = 0.6,
+    min_known_ratio: float = 0.3,
+    max_corrections: int = 20,
+) -> pd.DataFrame:
+    """
+    Active learning: minta user koreksi prediksi low-confidence,
+    update model real-time via partial_fit, simpan feedback history.
+    """
+    if model is None:
+        return df
+    clf = model.pipeline.named_steps["clf"]
+    if not hasattr(clf, "partial_fit"):
+        print("  [SKIP] Active learning: model tidak support partial_fit.")
+        return df
+
+    if "confidence_score" not in df.columns:
+        return df
+
+    low_mask = (
+        (df["confidence_score"] < min_confidence) |
+        (df["known_word_ratio"] < min_known_ratio)
+    )
+    low_conf_idx = df[low_mask].index.tolist()
+
+    if not low_conf_idx:
+        print("\n  [ACTIVE LEARNING] Semua prediksi sudah confident")
+        return df
+
+    n = min(len(low_conf_idx), max_corrections)
+    print(f"\n  {'='*60}")
+    print(f"  ACTIVE LEARNING - {n} komentar low-confidence perlu koreksi")
+    print(f"  Model akan belajar dari koreksi Anda via partial_fit!")
+    print(f"  {'='*60}")
+
+    corrections = []
+    for idx in low_conf_idx[:n]:
+        row = df.loc[idx]
+        text_orig = str(row.get("text", ""))[:120]
+        text_clean = str(row.get("text_clean", ""))
+        pred = row.get("sentimen_pred", "?")
+        conf = row.get("confidence_score", 0)
+        ratio = row.get("known_word_ratio", 0)
+
+        print(f"\n  [{idx}] {text_orig}")
+        print(f"       Pred={pred.upper():>8}  conf={conf:.2f}  known_ratio={ratio:.2f}")
+        ans = input("       Koreksi? (p)ositif / (n)egatif / (s)kip / (q)uit: ").strip().lower()
+
+        if ans == "q":
+            break
+        elif ans in ("p", "n"):
+            label_map = {"p": "positif", "n": "negatif"}
+            correct = label_map[ans]
+            corrections.append((text_clean, correct))
+            df.at[idx, "sentimen_pred"] = correct
+            df.at[idx, "confidence"] = "tinggi"
+            df.at[idx, "confidence_score"] = 1.0
+            df.at[idx, "metode_prediksi"] = "user_koreksi"
+            print(f"       OK -> {correct.upper()}")
+        # else skip
+
+    if corrections:
+        texts, labels = zip(*corrections)
+        print(f"\n  [ONLINE] Update model dengan {len(corrections)} koreksi...")
+        try:
+            model.partial_fit(list(texts), list(labels))
+            print(f"  [OK] Model berhasil diupdate!")
+
+            # Simpan ke feedback history
+            save_feedback_to_history(corrections, file_prefix)
+        except Exception as e:
+            print(f"  [WARN] Gagal partial_fit: {e}")
+    else:
+        print("\n  [ACTIVE LEARNING] Tidak ada koreksi.")
+
+    return df
+
+
+def save_feedback_to_history(corrections: list, source_scan: str):
+    """Simpan feedback ke CSV history untuk retrain periodik."""
+    now = datetime.now().isoformat()
+    rows = [
+        {"text_clean": t, "sentimen": l, "source_scan": source_scan, "timestamp": now}
+        for t, l in corrections
+    ]
+    df_new = pd.DataFrame(rows)
+    path = "./hasil_scanning/feedback_history.csv"
+    os.makedirs("./hasil_scanning", exist_ok=True)
+
+    if os.path.exists(path):
+        df_old = pd.read_csv(path, encoding="utf-8-sig")
+        df_all = pd.concat([df_old, df_new], ignore_index=True)
+    else:
+        df_all = df_new
+
+    df_all.to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"  [SAVED] Feedback history -> {path} ({len(df_all)} total entries)")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Scan sentimen komentar real-time dari link YouTube.")
     parser.add_argument("url_pos", type=str, nargs="?", help="URL/Link video YouTube (posisi argument pertama).")
@@ -346,6 +475,14 @@ def main():
     parser.add_argument("--model", type=str, default="./hasil/model_nb.pkl", help="Path ke model Naive Bayes terlatih.")
     parser.add_argument("--dataset", type=str, default="./data_raw/semua_topik.csv", help="Dataset training untuk update model otomatis.")
     parser.add_argument("--retrain", action="store_true", help="Paksa latih ulang model dari dataset sebelum scanning.")
+    parser.add_argument("--model-type", choices=["auto", "complement", "multinomial",
+                                                  "sgd_log", "sgd_hinge", "sgd_huber"],
+                        default="auto",
+                        help="Model classifier (default: auto = complement / sgd_log jika --use-online)")
+    parser.add_argument("--use-online", action="store_true",
+                        help="Aktifkan online learning (partial_fit), model -> sgd_log")
+    parser.add_argument("--use-char-ngrams", action="store_true",
+                        help="Pakai character n-grams (tangkap typo/slang non-kamus)")
     parser.add_argument("--confidence-threshold", type=float, default=0.45, help="Ambang confidence model sebelum fallback smart labeler.")
     parser.add_argument("--min-known-ratio", type=float, default=0.25, help="Rasio minimal kata yang dikenal model sebelum fallback.")
     args = parser.parse_args()
@@ -389,6 +526,9 @@ def main():
         dataset_path=args.dataset,
         force_retrain=args.retrain,
         use_stemming=True,
+        model_type=args.model_type,
+        use_online=args.use_online,
+        use_char_ngrams=args.use_char_ngrams,
     )
 
     preprocessor = PreprocessorIndonesia(use_stemming=True)
@@ -409,6 +549,17 @@ def main():
         model=model,
         confidence_threshold=args.confidence_threshold,
         min_known_ratio=args.min_known_ratio,
+    )
+
+    # Active Learning: user koreksi untuk low-confidence predictions
+    print("\n  [3b/4] Active Learning - Koreksi prediksi low-confidence...")
+    df_comments = active_learning_correction_loop(
+        df=df_comments,
+        model=model,
+        file_prefix=file_name_input,
+        min_confidence=0.6,
+        min_known_ratio=0.25,
+        max_corrections=20,
     )
 
     # Simpan CSV Hasil Analisis yang sudah Difilter
@@ -433,7 +584,7 @@ def main():
     print(f"  Model           : {args.model if model is not None else 'fallback SmartSentimentLabeler'}")
     print("-" * 65)
     
-    for label in ["positif", "netral", "negatif"]:
+    for label in ["positif", "negatif"]:
         cnt = counts.get(label, 0)
         pct = (cnt / total) * 100
         bar = "=" * int(pct / 4)
@@ -457,16 +608,15 @@ def main():
         print("  =========================================")
         print("  [1] Tampilkan Komentar POSITIF")
         print("  [2] Tampilkan Komentar NEGATIF")
-        print("  [3] Tampilkan Komentar NETRAL")
         print("  [0] Keluar")
         
-        pilihan = input("  Masukkan pilihan Anda (0-3): ").strip()
+        pilihan = input("  Masukkan pilihan Anda (0-2): ").strip()
         
         if pilihan == '0':
             print("  Terima kasih telah menggunakan scanner ini!")
             break
-        elif pilihan in ['1', '2', '3']:
-            label_map = {'1': 'positif', '2': 'negatif', '3': 'netral'}
+        elif pilihan in ['1', '2']:
+            label_map = {'1': 'positif', '2': 'negatif'}
             sentimen_pilihan = label_map[pilihan]
             
             # Filter data sesuai pilihan
