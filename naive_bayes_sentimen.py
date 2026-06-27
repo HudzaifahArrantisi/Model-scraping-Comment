@@ -183,6 +183,7 @@ class PreprocessorIndonesia:
         "🤮": "negatif_emoji", "😷": "negatif_emoji", "💔": "negatif_emoji",
         "❌": "negatif_emoji", "🚫": "negatif_emoji", "😞": "negatif_emoji",
         "😔": "negatif_emoji", "😒": "negatif_emoji", "🙄": "negatif_emoji",
+        
         # Netral / tanya
         "❓": "netral_emoji", "⁉️": "netral_emoji", "🤔": "netral_emoji",
         "😐": "netral_emoji", "😑": "netral_emoji",

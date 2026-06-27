@@ -485,6 +485,8 @@ def main():
                         help="Pakai character n-grams (tangkap typo/slang non-kamus)")
     parser.add_argument("--confidence-threshold", type=float, default=0.45, help="Ambang confidence model sebelum fallback smart labeler.")
     parser.add_argument("--min-known-ratio", type=float, default=0.25, help="Rasio minimal kata yang dikenal model sebelum fallback.")
+    parser.add_argument("--cari", "-c", type=str, default=None,
+                        help="Hanya proses komentar yang mengandung kata kunci ini (case-insensitive)")
     args = parser.parse_args()
 
     url = args.url or args.url_pos
@@ -541,6 +543,18 @@ def main():
     if df_comments.empty:
         print("  [WARN] Semua komentar kosong setelah pembersihan (tidak dapat difilter).")
         sys.exit(1)
+
+    # Filter berdasarkan kata kunci (--cari)
+    if args.cari:
+        keyword = args.cari.strip().lower()
+        print(f"        Filter komentar mengandung kata kunci: '{args.cari}'")
+        before = len(df_comments)
+        mask = df_comments["text_clean"].str.lower().str.contains(keyword, na=False)
+        df_comments = df_comments[mask].reset_index(drop=True)
+        print(f"        Ditemukan {len(df_comments)} komentar dari {before} total.")
+        if df_comments.empty:
+            print("  [WARN] Tidak ada komentar yang mengandung kata kunci tersebut.")
+            sys.exit(0)
 
     # Prediksi kategori sentimen menggunakan model yang sudah belajar dari dataset.
     print("        Menganalisis sentimen menggunakan model ML + fallback kata tidak dikenal...")

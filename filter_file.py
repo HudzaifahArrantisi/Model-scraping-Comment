@@ -6,16 +6,20 @@ Deskripsi:
   Script ini digunakan untuk membaca file CSV hasil scanning sentimen
   (baik dari folder ./hasil_scanning/ maupun ./hasil/) dan menampilkan
   komentarnya secara interaktif berdasarkan kategori sentimen
-  (Positif, Negatif, Netral).
+  (Positif, Negatif, Netral) atau filter kata kunci.
 
 Cara Pakai:
   python filter_file.py
+  python filter_file.py --cari "danantara"
+  python filter_file.py --cari "prabowo gibran" --sentimen positif
+  python filter_file.py --cari "makan bergizi" --limit 20
 ==============================================================
 """
 
 import os
 import sys
 import re
+import argparse
 import pandas as pd
 
 # Konfigurasi kandidat kolom
@@ -71,42 +75,72 @@ def list_csv_files():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Filter komentar dari CSV berdasarkan kata kunci dan/atau sentimen")
+    parser.add_argument("--cari", "-c", type=str, default=None,
+                        help="Kata kunci untuk filter komentar (case-insensitive, bisa multi kata)")
+    parser.add_argument("--sentimen", "-s", type=str, default=None,
+                        choices=["positif", "negatif", "netral", "pos", "neg"],
+                        help="Filter berdasarkan sentimen")
+    parser.add_argument("--limit", "-l", type=int, default=None,
+                        help="Jumlah maksimal komentar yang ditampilkan")
+    parser.add_argument("--file", "-f", type=str, default=None,
+                        help="Langsung tentukan path file CSV (skip menu pilih file)")
+    parser.add_argument("--output", "-o", type=str, default=None,
+                        help="Simpan hasil filter ke file CSV baru")
+    args = parser.parse_args()
+    
     clear_screen()
     print("=========================================================")
     print("         CSV COMMENT FILTER & SENTIMENT VIEWER           ")
     print("=========================================================")
     
-    # 1. Pilih File CSV
-    files = list_csv_files()
-    if not files:
-        print("\n  [WARN] Tidak ditemukan file CSV hasil analisis sentimen.")
-        print("          Pastikan Anda sudah melakukan scanning terlebih dahulu.")
-        input("\n  Tekan Enter untuk keluar...")
-        sys.exit(0)
-        
-    print("\n  Daftar file CSV yang tersedia:")
-    for idx, (path, desc) in enumerate(files, 1):
-        filename = os.path.basename(path)
-        print(f"  [{idx}] {filename:<30} (Folder: {desc})")
-        
-    print("  [0] Keluar")
+    # Mapping sentimen
+    sentimen_map = {"positif": "positif", "pos": "positif",
+                    "negatif": "negatif", "neg": "negatif",
+                    "netral": "netral"}
+    sentimen_target = sentimen_map.get(args.sentimen) if args.sentimen else None
     
-    try:
-        pilihan_file = int(input(f"\n  Pilih nomor file yang ingin dilihat (0-{len(files)}): ").strip())
-    except ValueError:
-        print("  [ERROR] Input harus berupa angka.")
-        sys.exit(1)
-        
-    if pilihan_file == 0:
-        print("  Keluar program.")
-        sys.exit(0)
-        
-    if pilihan_file < 1 or pilihan_file > len(files):
-        print("  [ERROR] Pilihan tidak tersedia.")
-        sys.exit(1)
-        
-    selected_path = files[pilihan_file - 1][0]
-    filename = os.path.basename(selected_path)
+    # 1. Pilih File CSV
+    is_cli_mode = bool(args.cari or args.sentimen or args.limit is not None or args.output)
+
+    if args.file:
+        if not os.path.exists(args.file):
+            print(f"\n  [ERROR] File '{args.file}' tidak ditemukan.")
+            sys.exit(1)
+        selected_path = args.file
+        filename = os.path.basename(selected_path)
+    else:
+        files = list_csv_files()
+        if not files:
+            print("\n  [WARN] Tidak ditemukan file CSV hasil analisis sentimen.")
+            print("          Pastikan Anda sudah melakukan scanning terlebih dahulu.")
+            sys.exit(0)
+            
+        if is_cli_mode:
+            # CLI mode: auto-pilih file pertama (non-interaktif)
+            selected_path = files[0][0]
+            filename = os.path.basename(selected_path)
+            print(f"\n  [INFO] Menggunakan file: {filename}")
+        else:
+            print("\n  Daftar file CSV yang tersedia:")
+            for idx, (path, desc) in enumerate(files, 1):
+                fname = os.path.basename(path)
+                print(f"  [{idx}] {fname:<30} (Folder: {desc})")
+            print("  [0] Keluar")
+            
+            try:
+                pilihan_file = int(input(f"\n  Pilih nomor file yang ingin dilihat (0-{len(files)}): ").strip())
+            except ValueError:
+                print("  [ERROR] Input harus berupa angka.")
+                sys.exit(1)
+            if pilihan_file == 0:
+                print("  Keluar program.")
+                sys.exit(0)
+            if pilihan_file < 1 or pilihan_file > len(files):
+                print("  [ERROR] Pilihan tidak tersedia.")
+                sys.exit(1)
+            selected_path = files[pilihan_file - 1][0]
+            filename = os.path.basename(selected_path)
     
     # 2. Baca File
     try:
@@ -151,14 +185,39 @@ def main():
         if author_col:
             break
 
-    # 4. Tampilkan Ringkasan Singkat File
+    # 4. Filter berdasarkan kata kunci (--cari)
+    keyword_filter_applied = False
+    if args.cari:
+        keyword = args.cari.strip().lower()
+        print(f"\n  [FILTER] Mencari komentar mengandung: '{args.cari}'")
+        # Cari di kolom teks (case-insensitive)
+        mask = df[text_col].astype(str).str.lower().str.contains(keyword, na=False)
+        df = df[mask].reset_index(drop=True)
+        keyword_filter_applied = True
+        print(f"  [FILTER] Ditemukan {len(df)} komentar.")
+    
+    # 5. Filter berdasarkan sentimen (--sentimen)
+    if sentimen_target:
+        print(f"\n  [FILTER] Menampilkan sentimen: {sentimen_target.upper()}")
+        df = df[df[sentimen_col] == sentimen_target].reset_index(drop=True)
+        print(f"  [FILTER] Tersisa {len(df)} komentar.")
+    
+    # 6. Tampilkan Ringkasan Singkat File
     counts = df[sentimen_col].value_counts()
     total = len(df)
+    
+    if total == 0:
+        print("\n  [INFO] Tidak ada komentar yang cocok dengan filter.")
+        if not is_cli_mode:
+            input("\n  Tekan Enter untuk keluar...")
+        sys.exit(0)
     
     clear_screen()
     print("=========================================================")
     print(f"  FILE : {filename}")
     print(f"  Total Data : {total} baris")
+    if keyword_filter_applied:
+        print(f"  FILTER KATA KUNCI : '{args.cari}'")
     print("=========================================================")
     for label in ["positif", "netral", "negatif"]:
         cnt = counts.get(label, 0)
@@ -167,7 +226,36 @@ def main():
         print(f"  {label.upper():<10} : {cnt:>4} komentar ({pct:>6.2f}%) {bar}")
     print("=========================================================")
     
-    # 5. Menu Interaktif Filter Sentimen
+    # 6a. Jika --output, simpan langsung tanpa menu interaktif
+    if args.output:
+        df.to_csv(args.output, index=False, encoding="utf-8-sig")
+        print(f"\n  [OUTPUT] Hasil filter disimpan ke: {args.output}")
+        print("  Selesai.")
+        return
+    
+    # Jika CLI mode (ada args), tampilkan hasil langsung tanpa menu interaktif
+    if args.cari or args.sentimen or args.file or args.limit:
+        limit_tampil = min(args.limit or 50, len(df), 50)
+        print(f"\n  --- HASIL FILTER ({total} komentar, ditampilkan {limit_tampil}) ---")
+        print("  " + "-" * 115)
+        print(f"  | {'NO':<3} | {'NAMA AKUN':<25} | {'ISI KOMENTAR':<75} |")
+        print("  " + "-" * 115)
+        
+        for idx, row in enumerate(df.head(limit_tampil).itertuples(), 1):
+            teks_raw = getattr(row, text_col)
+            teks_asli = str(teks_raw).replace('\n', ' ') if pd.notna(teks_raw) else ""
+            akun_raw = getattr(row, author_col) if author_col else "Anonymous"
+            akun = str(akun_raw)[:25] if pd.notna(akun_raw) else "Anonymous"
+            komentar = teks_asli[:72] + "..." if len(teks_asli) > 75 else teks_asli
+            print(f"  | {idx:<3} | {akun:<25} | {komentar:<75} |")
+        
+        print("  " + "-" * 115)
+        if total > limit_tampil:
+            print(f"  ... dan {total - limit_tampil} komentar lainnya.")
+        print()
+        return
+    
+    # 7. Menu Interaktif Filter Sentimen
     while True:
         print("\n  =========================================")
         print("  PILIHAN LIHAT KOMENTAR BERDASARKAN SENTIMEN")
